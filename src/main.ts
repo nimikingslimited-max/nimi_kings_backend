@@ -1,6 +1,7 @@
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import { PrismaClientExceptionFilter } from './common/filters/prisma-client-exception.filter.js';
 import { AppModule } from './app.module.js';
 
 async function bootstrap() {
@@ -14,6 +15,9 @@ async function bootstrap() {
     origin: true,
     credentials: true,
   });
+
+  // Global filters for database & runtime exceptions
+  app.useGlobalFilters(new PrismaClientExceptionFilter());
 
   // Global validation pipe for strict DTO checking
   app.useGlobalPipes(
