@@ -8,6 +8,8 @@ import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { ConfigService } from '@nestjs/config';
 
+import pg from 'pg';
+
 @Injectable()
 export class PrismaService
   extends PrismaClient
@@ -20,7 +22,15 @@ export class PrismaService
       configService.get<string>('DATABASE_URL') ||
       process.env.DATABASE_URL ||
       '';
-    const adapter = new PrismaPg({ connectionString });
+    const isLocal =
+      connectionString.includes('localhost') ||
+      connectionString.includes('127.0.0.1');
+
+    const pool = new pg.Pool({
+      connectionString,
+      ssl: isLocal ? false : { rejectUnauthorized: false },
+    });
+    const adapter = new PrismaPg(pool);
     super({ adapter });
   }
 
