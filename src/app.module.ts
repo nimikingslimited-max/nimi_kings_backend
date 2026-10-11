@@ -5,6 +5,7 @@ import { AppController } from './app.controller.js';
 import { AppService } from './app.service.js';
 import { PrismaModule } from './common/prisma/prisma.module.js';
 import { AuthModule } from './auth/auth.module.js';
+import { PropertiesModule } from './properties/properties.module.js';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard.js';
 import { RolesGuard } from './common/guards/roles.guard.js';
 
@@ -15,6 +16,7 @@ import { RolesGuard } from './common/guards/roles.guard.js';
     }),
     PrismaModule,
     AuthModule,
+    PropertiesModule,
   ],
   controllers: [AppController],
   providers: [
