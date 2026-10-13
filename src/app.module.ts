@@ -7,6 +7,9 @@ import { PrismaModule } from './common/prisma/prisma.module.js';
 import { AuthModule } from './auth/auth.module.js';
 import { PropertiesModule } from './properties/properties.module.js';
 import { PropertyVerificationModule } from './property-verification/property-verification.module.js';
+import { EnquiriesModule } from './enquiries/enquiries.module.js';
+import { InspectionsModule } from './inspections/inspections.module.js';
+import { PropertySearchModule } from './property-search/property-search.module.js';
 import { AuditModule } from './common/audit/audit.module.js';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard.js';
 import { RolesGuard } from './common/guards/roles.guard.js';
@@ -21,6 +24,9 @@ import { RolesGuard } from './common/guards/roles.guard.js';
     AuthModule,
     PropertiesModule,
     PropertyVerificationModule,
+    PropertySearchModule,
+    EnquiriesModule,
+    InspectionsModule,
   ],
   controllers: [AppController],
   providers: [
