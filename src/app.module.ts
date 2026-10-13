@@ -10,6 +10,8 @@ import { PropertyVerificationModule } from './property-verification/property-ver
 import { EnquiriesModule } from './enquiries/enquiries.module.js';
 import { InspectionsModule } from './inspections/inspections.module.js';
 import { PropertySearchModule } from './property-search/property-search.module.js';
+import { NotificationsModule } from './notifications/notifications.module.js';
+import { MessagingModule } from './messaging/messaging.module.js';
 import { AuditModule } from './common/audit/audit.module.js';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard.js';
 import { RolesGuard } from './common/guards/roles.guard.js';
@@ -27,6 +29,8 @@ import { RolesGuard } from './common/guards/roles.guard.js';
     PropertySearchModule,
     EnquiriesModule,
     InspectionsModule,
+    NotificationsModule,
+    MessagingModule,
   ],
   controllers: [AppController],
   providers: [
