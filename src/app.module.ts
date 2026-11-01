@@ -4,7 +4,9 @@ import { APP_GUARD } from '@nestjs/core';
 import { AppController } from './app.controller.js';
 import { AppService } from './app.service.js';
 import { PrismaModule } from './common/prisma/prisma.module.js';
+import { EmailModule } from './common/email/email.module.js';
 import { AuthModule } from './auth/auth.module.js';
+import { UsersModule } from './users/users.module.js';
 import { PropertiesModule } from './properties/properties.module.js';
 import { PropertyVerificationModule } from './property-verification/property-verification.module.js';
 import { EnquiriesModule } from './enquiries/enquiries.module.js';
@@ -23,7 +25,9 @@ import { RolesGuard } from './common/guards/roles.guard.js';
     }),
     PrismaModule,
     AuditModule,
+    EmailModule,
     AuthModule,
+    UsersModule,
     PropertiesModule,
     PropertyVerificationModule,
     PropertySearchModule,
