@@ -213,6 +213,7 @@ model User {
   messagesSent      Message[]
   conversationParticipants ConversationParticipant[]
   notifications     Notification[]
+  savedProperties   SavedProperty[]
   transactionsCustomer Transaction[]    @relation("CustomerTransactions")
   transactionsAgent    Transaction[]    @relation("AgentTransactions")
   projectsManaged   ConstructionProject[] @relation("ProjectManager")
@@ -387,6 +388,7 @@ model Property {
   enquiries     PropertyEnquiry[]
   inspections   PropertyInspection[]
   assignedAgents PropertyAgent[]
+  savedByUsers   SavedProperty[]
   transactions  Transaction[]
   constructionProjects ConstructionProject[]
 
@@ -432,6 +434,21 @@ model PropertyMedia {
 
   @@index([propertyId])
   @@map("property_media")
+}
+
+model SavedProperty {
+  id         String   @id @default(uuid())
+  userId     String   @map("user_id")
+  propertyId String   @map("property_id")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  property Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, propertyId])
+  @@index([userId])
+  @@index([propertyId])
+  @@map("saved_properties")
 }
 
 model Feature {

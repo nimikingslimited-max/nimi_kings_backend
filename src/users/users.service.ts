@@ -6,6 +6,7 @@ import {
 import { PrismaService } from '../common/prisma/prisma.service.js';
 import { AuditService } from '../common/audit/audit.service.js';
 import { UpdateProfileDto } from './dto/update-profile.dto.js';
+import { FavoriteQueryDto } from './dto/favorite-query.dto.js';
 
 @Injectable()
 export class UsersService {
@@ -174,10 +175,12 @@ export class UsersService {
       completedInspections,
       unreadNotificationsCount,
       activeConversationsCount,
+      totalSavedProperties,
       upcomingSiteVisits,
       recentEnquiries,
       assignedAgents,
       recentNotifications,
+      recentSavedProperties,
     ] = await Promise.all([
       // Enquiries counts
       this.prisma.propertyEnquiry.count({ where: { customerId: userId } }),
@@ -214,6 +217,11 @@ export class UsersService {
 
       // Active conversations
       this.prisma.conversationParticipant.count({
+        where: { userId },
+      }),
+
+      // Total saved properties count
+      this.prisma.savedProperty.count({
         where: { userId },
       }),
 
@@ -303,6 +311,35 @@ export class UsersService {
         orderBy: { createdAt: 'desc' },
         take: 5,
       }),
+
+      // Top 3 recent saved properties
+      this.prisma.savedProperty.findMany({
+        where: { userId },
+        orderBy: { createdAt: 'desc' },
+        take: 3,
+        include: {
+          property: {
+            select: {
+              id: true,
+              propertyCode: true,
+              title: true,
+              propertyType: true,
+              city: true,
+              state: true,
+              media: {
+                where: { isPrimary: true },
+                take: 1,
+                select: { url: true, thumbnailUrl: true },
+              },
+              listings: {
+                where: { status: 'PUBLISHED' },
+                take: 1,
+                select: { price: true, currency: true, listingType: true },
+              },
+            },
+          },
+        },
+      }),
     ]);
 
     // Fetch assigned agents user data
@@ -343,11 +380,23 @@ export class UsersService {
           upcoming: upcomingInspectionsCount,
           completed: completedInspections,
         },
+        savedPropertiesCount: totalSavedProperties,
         unreadNotificationsCount,
         activeConversationsCount,
       },
       upcomingSiteVisits,
       recentEnquiries,
+      savedPropertiesPreview: recentSavedProperties.map((s) => ({
+        id: s.property.id,
+        propertyCode: s.property.propertyCode,
+        title: s.property.title,
+        propertyType: s.property.propertyType,
+        city: s.property.city,
+        state: s.property.state,
+        primaryMedia: s.property.media[0] || null,
+        listing: s.property.listings[0] || null,
+        savedAt: s.createdAt,
+      })),
       assignedConsultants: agentUsers,
       recentNotifications,
     };
@@ -382,6 +431,149 @@ export class UsersService {
     return {
       count: agents.length,
       data: agents,
+    };
+  }
+
+  async addToFavorites(userId: string, propertyId: string) {
+    const property = await this.prisma.property.findFirst({
+      where: { id: propertyId, deletedAt: null },
+      select: { id: true, title: true, propertyCode: true },
+    });
+
+    if (!property) {
+      throw new NotFoundException(
+        'Property not found or is no longer available',
+      );
+    }
+
+    await this.prisma.savedProperty.upsert({
+      where: {
+        userId_propertyId: {
+          userId,
+          propertyId,
+        },
+      },
+      update: {},
+      create: {
+        userId,
+        propertyId,
+      },
+    });
+
+    return {
+      message: 'Property successfully added to your saved favorites',
+      isFavorite: true,
+      property: {
+        id: property.id,
+        title: property.title,
+        propertyCode: property.propertyCode,
+      },
+    };
+  }
+
+  async removeFromFavorites(userId: string, propertyId: string) {
+    await this.prisma.savedProperty.deleteMany({
+      where: {
+        userId,
+        propertyId,
+      },
+    });
+
+    return {
+      message: 'Property removed from your saved favorites',
+      isFavorite: false,
+    };
+  }
+
+  async checkIsFavorite(userId: string, propertyId: string) {
+    const saved = await this.prisma.savedProperty.findUnique({
+      where: {
+        userId_propertyId: {
+          userId,
+          propertyId,
+        },
+      },
+    });
+
+    return {
+      propertyId,
+      isFavorite: !!saved,
+    };
+  }
+
+  async getFavorites(userId: string, query: FavoriteQueryDto) {
+    const page = Math.max(1, query.page || 1);
+    const limit = Math.max(1, Math.min(50, query.limit || 10));
+    const skip = (page - 1) * limit;
+
+    const [total, favorites] = await Promise.all([
+      this.prisma.savedProperty.count({ where: { userId } }),
+      this.prisma.savedProperty.findMany({
+        where: { userId },
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: limit,
+        include: {
+          property: {
+            include: {
+              media: {
+                where: { isPrimary: true },
+                take: 1,
+                select: { url: true, thumbnailUrl: true },
+              },
+              listings: {
+                where: { status: 'PUBLISHED' },
+                take: 1,
+                select: {
+                  id: true,
+                  price: true,
+                  currency: true,
+                  listingType: true,
+                  status: true,
+                },
+              },
+              verification: {
+                select: {
+                  status: true,
+                  riskLevel: true,
+                  completedAt: true,
+                },
+              },
+            },
+          },
+        },
+      }),
+    ]);
+
+    return {
+      meta: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit),
+      },
+      data: favorites.map((fav) => ({
+        savedAt: fav.createdAt,
+        property: {
+          id: fav.property.id,
+          propertyCode: fav.property.propertyCode,
+          title: fav.property.title,
+          description: fav.property.description,
+          propertyType: fav.property.propertyType,
+          address: fav.property.address,
+          city: fav.property.city,
+          state: fav.property.state,
+          country: fav.property.country,
+          bedrooms: fav.property.bedrooms,
+          bathrooms: fav.property.bathrooms,
+          parkingSpaces: fav.property.parkingSpaces,
+          landSize: fav.property.landSize,
+          landSizeUnit: fav.property.landSizeUnit,
+          primaryMedia: fav.property.media[0] || null,
+          activeListing: fav.property.listings[0] || null,
+          verification: fav.property.verification || null,
+        },
+      })),
     };
   }
 }

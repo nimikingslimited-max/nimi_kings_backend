@@ -1,8 +1,12 @@
 import {
   Controller,
   Get,
+  Post,
+  Delete,
   Patch,
   Body,
+  Param,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import {
@@ -10,9 +14,11 @@ import {
   ApiOperation,
   ApiResponse,
   ApiBearerAuth,
+  ApiParam,
 } from '@nestjs/swagger';
 import { UsersService } from './users.service.js';
 import { UpdateProfileDto } from './dto/update-profile.dto.js';
+import { FavoriteQueryDto } from './dto/favorite-query.dto.js';
 import { CurrentUser } from '../common/decorators/current-user.decorator.js';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard.js';
 
@@ -82,5 +88,77 @@ export class UsersController {
   })
   getMyAssignedAgents(@CurrentUser('id') userId: string) {
     return this.usersService.getMyAssignedAgents(userId);
+  }
+
+  // ==========================================
+  // SAVED PROPERTIES / FAVORITES (WISHLIST)
+  // ==========================================
+
+  @Get('favorites')
+  @ApiOperation({
+    summary:
+      'Get customer saved properties / wishlist with pagination, active pricing, primary media, and verification status',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Paginated list of saved favorite properties',
+  })
+  getFavorites(
+    @CurrentUser('id') userId: string,
+    @Query() query: FavoriteQueryDto,
+  ) {
+    return this.usersService.getFavorites(userId, query);
+  }
+
+  @Get('favorites/check/:propertyId')
+  @ApiOperation({
+    summary: 'Check if a specific property is in customer saved favorites',
+  })
+  @ApiParam({ name: 'propertyId', description: 'Property UUID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Returns { propertyId, isFavorite: boolean }',
+  })
+  checkIsFavorite(
+    @CurrentUser('id') userId: string,
+    @Param('propertyId') propertyId: string,
+  ) {
+    return this.usersService.checkIsFavorite(userId, propertyId);
+  }
+
+  @Post('favorites/:propertyId')
+  @ApiOperation({
+    summary: 'Add a property to customer saved favorites / wishlist',
+  })
+  @ApiParam({ name: 'propertyId', description: 'Property UUID to save' })
+  @ApiResponse({
+    status: 201,
+    description: 'Property added to saved favorites',
+  })
+  @ApiResponse({
+    status: 404,
+    description: 'Property not found',
+  })
+  addToFavorites(
+    @CurrentUser('id') userId: string,
+    @Param('propertyId') propertyId: string,
+  ) {
+    return this.usersService.addToFavorites(userId, propertyId);
+  }
+
+  @Delete('favorites/:propertyId')
+  @ApiOperation({
+    summary: 'Remove a property from customer saved favorites / wishlist',
+  })
+  @ApiParam({ name: 'propertyId', description: 'Property UUID to remove' })
+  @ApiResponse({
+    status: 200,
+    description: 'Property removed from saved favorites',
+  })
+  removeFromFavorites(
+    @CurrentUser('id') userId: string,
+    @Param('propertyId') propertyId: string,
+  ) {
+    return this.usersService.removeFromFavorites(userId, propertyId);
   }
 }
