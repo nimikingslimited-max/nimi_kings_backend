@@ -16,6 +16,8 @@ import { LoginDto } from './dto/login.dto.js';
 import { ForgotPasswordDto } from './dto/forgot-password.dto.js';
 import { ResetPasswordDto } from './dto/reset-password.dto.js';
 import { ChangePasswordDto } from './dto/change-password.dto.js';
+import { VerifyEmailDto } from './dto/verify-email.dto.js';
+import { ResendVerificationDto } from './dto/resend-verification.dto.js';
 
 @Injectable()
 export class AuthService {
@@ -61,64 +63,80 @@ export class AuthService {
       });
     }
 
-    // Create user and profile in a single atomic transaction
-    const user = await this.prisma.$transaction(async (tx) => {
-      const newUser = await tx.user.create({
-        data: {
-          firstName: dto.firstName,
-          lastName: dto.lastName,
-          email: dto.email.toLowerCase(),
-          phone: dto.phone,
-          passwordHash,
-          status: 'ACTIVE',
-          userRoles: {
-            create: {
-              roleId: role.id,
+    // Create user, profile, and email verification token in a single atomic transaction
+    const { user, verificationCode } = await this.prisma.$transaction(
+      async (tx) => {
+        const newUser = await tx.user.create({
+          data: {
+            firstName: dto.firstName,
+            lastName: dto.lastName,
+            email: dto.email.toLowerCase(),
+            phone: dto.phone,
+            passwordHash,
+            status: 'PENDING',
+            userRoles: {
+              create: {
+                roleId: role.id,
+              },
             },
           },
-        },
-      });
+        });
 
-      if (roleName === RoleType.CUSTOMER) {
-        await tx.customerProfile.create({
+        if (roleName === RoleType.CUSTOMER) {
+          await tx.customerProfile.create({
+            data: {
+              userId: newUser.id,
+            },
+          });
+        } else if (roleName === RoleType.AGENT) {
+          const agentCode = `NK-AG-${Math.floor(1000 + Math.random() * 9000)}`;
+          await tx.agentProfile.create({
+            data: {
+              userId: newUser.id,
+              agentCode,
+            },
+          });
+        }
+
+        // Generate 6-digit email verification code
+        const code = Math.floor(100000 + Math.random() * 900000).toString();
+        const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
+
+        await tx.emailVerificationToken.create({
           data: {
             userId: newUser.id,
+            token: code,
+            expiresAt,
           },
         });
-      } else if (roleName === RoleType.AGENT) {
-        const agentCode = `NK-AG-${Math.floor(1000 + Math.random() * 9000)}`;
-        await tx.agentProfile.create({
-          data: {
-            userId: newUser.id,
-            agentCode,
-          },
-        });
-      }
 
-      return newUser;
-    });
+        return { user: newUser, verificationCode: code };
+      },
+      {
+        maxWait: 10000,
+        timeout: 20000,
+      },
+    );
 
-    // Send Welcome Email asynchronously
+    // Send Email Verification Code asynchronously
     this.emailService
-      .sendWelcomeEmail(user.email, user.firstName)
+      .sendEmailVerificationCode(user.email, user.firstName, verificationCode)
       .catch((err) => {
         // Non-blocking error handling
       });
 
-    const tokens = await this.generateTokens(user.id, user.email, [roleName]);
-    await this.storeRefreshToken(user.id, tokens.refreshToken);
-
     return {
-      message: 'Account successfully registered',
+      message:
+        'Account successfully registered. Please verify your email using the 6-digit code sent to your inbox before logging in.',
       user: {
         id: user.id,
         firstName: user.firstName,
         lastName: user.lastName,
         email: user.email,
         phone: user.phone,
+        status: user.status,
         roles: [roleName],
       },
-      tokens,
     };
   }
 
@@ -136,6 +154,12 @@ export class AuthService {
 
     if (!user) {
       throw new UnauthorizedException('Invalid credentials');
+    }
+
+    if (!user.emailVerifiedAt || user.status === 'PENDING') {
+      throw new UnauthorizedException(
+        'Your email address has not been verified yet. Please check your email for the verification code or request a new one.',
+      );
     }
 
     if (user.status !== 'ACTIVE') {
@@ -245,6 +269,125 @@ export class AuthService {
     });
 
     return { message: 'Logged out successfully' };
+  }
+
+  async verifyEmail(dto: VerifyEmailDto) {
+    const user = await this.prisma.user.findUnique({
+      where: { email: dto.email.toLowerCase() },
+      include: {
+        userRoles: {
+          include: {
+            role: true,
+          },
+        },
+      },
+    });
+
+    if (!user) {
+      throw new BadRequestException('Invalid email or verification code.');
+    }
+
+    if (user.emailVerifiedAt && user.status === 'ACTIVE') {
+      return {
+        message: 'Email is already verified. You can proceed to log in.',
+      };
+    }
+
+    const verificationRecord =
+      await this.prisma.emailVerificationToken.findFirst({
+        where: {
+          userId: user.id,
+          token: dto.code.trim(),
+          isUsed: false,
+        },
+        orderBy: { createdAt: 'desc' },
+      });
+
+    if (!verificationRecord || verificationRecord.expiresAt < new Date()) {
+      throw new BadRequestException(
+        'Invalid or expired email verification code. Please request a new one.',
+      );
+    }
+
+    // Activate user and mark verification code as used
+    await this.prisma.$transaction([
+      this.prisma.user.update({
+        where: { id: user.id },
+        data: {
+          status: 'ACTIVE',
+          emailVerifiedAt: new Date(),
+        },
+      }),
+      this.prisma.emailVerificationToken.update({
+        where: { id: verificationRecord.id },
+        data: { isUsed: true },
+      }),
+    ]);
+
+    // Send Welcome Email once email is verified
+    this.emailService
+      .sendWelcomeEmail(user.email, user.firstName)
+      .catch(() => {});
+
+    // Generate tokens so user is immediately logged in upon email verification
+    const roles = user.userRoles.map((ur) => ur.role.name);
+    const tokens = await this.generateTokens(user.id, user.email, roles);
+    await this.storeRefreshToken(user.id, tokens.refreshToken);
+
+    return {
+      message: 'Email verified successfully. Your account is now active.',
+      user: {
+        id: user.id,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        email: user.email,
+        phone: user.phone,
+        roles,
+      },
+      tokens,
+    };
+  }
+
+  async resendVerificationCode(dto: ResendVerificationDto) {
+    const user = await this.prisma.user.findUnique({
+      where: { email: dto.email.toLowerCase() },
+    });
+
+    if (user && user.emailVerifiedAt && user.status === 'ACTIVE') {
+      return {
+        message:
+          'This email address is already verified. You can log in directly.',
+      };
+    }
+
+    if (user && user.status === 'PENDING') {
+      // Invalidate previous unused codes
+      await this.prisma.emailVerificationToken.updateMany({
+        where: { userId: user.id, isUsed: false },
+        data: { isUsed: true },
+      });
+
+      // Generate fresh 6-digit code
+      const code = Math.floor(100000 + Math.random() * 900000).toString();
+      const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
+
+      await this.prisma.emailVerificationToken.create({
+        data: {
+          userId: user.id,
+          token: code,
+          expiresAt,
+        },
+      });
+
+      this.emailService
+        .sendEmailVerificationCode(user.email, user.firstName, code)
+        .catch(() => {});
+    }
+
+    return {
+      message:
+        'If an unverified account exists with this email address, a new verification code has been dispatched.',
+    };
   }
 
   async forgotPassword(dto: ForgotPasswordDto) {

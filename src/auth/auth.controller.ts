@@ -21,6 +21,8 @@ import { RefreshTokenDto } from './dto/refresh-token.dto.js';
 import { ForgotPasswordDto } from './dto/forgot-password.dto.js';
 import { ResetPasswordDto } from './dto/reset-password.dto.js';
 import { ChangePasswordDto } from './dto/change-password.dto.js';
+import { VerifyEmailDto } from './dto/verify-email.dto.js';
+import { ResendVerificationDto } from './dto/resend-verification.dto.js';
 import { Public } from '../common/decorators/public.decorator.js';
 import { CurrentUser } from '../common/decorators/current-user.decorator.js';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard.js';
@@ -34,11 +36,12 @@ export class AuthController {
   @Post('register')
   @ApiOperation({
     summary:
-      'Register a new Customer or Agent account (sends Welcome Email)',
+      'Register a new Customer or Agent account (dispatches 6-digit email verification code)',
   })
   @ApiResponse({
     status: 201,
-    description: 'Account successfully created with access & refresh tokens',
+    description:
+      'Account created with PENDING status, verification code sent to email',
   })
   @ApiResponse({
     status: 409,
@@ -46,6 +49,41 @@ export class AuthController {
   })
   async register(@Body() dto: RegisterDto) {
     return this.authService.register(dto);
+  }
+
+  @Public()
+  @Post('verify-email')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Verify customer/agent email address with 6-digit code and activate account',
+  })
+  @ApiResponse({
+    status: 200,
+    description:
+      'Email verified, account activated, and authentication tokens issued',
+  })
+  @ApiResponse({
+    status: 400,
+    description: 'Invalid or expired verification code',
+  })
+  async verifyEmail(@Body() dto: VerifyEmailDto) {
+    return this.authService.verifyEmail(dto);
+  }
+
+  @Public()
+  @Post('resend-verification')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Resend a fresh 6-digit email verification code to an unverified account',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Verification code dispatched if account is pending',
+  })
+  async resendVerification(@Body() dto: ResendVerificationDto) {
+    return this.authService.resendVerificationCode(dto);
   }
 
   @Public()

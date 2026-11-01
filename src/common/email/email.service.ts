@@ -65,6 +65,66 @@ export class EmailService {
     }
   }
 
+  async sendEmailVerificationCode(
+    to: string,
+    name: string,
+    code: string,
+    verifyUrl?: string,
+  ): Promise<boolean> {
+    const subject = 'Verify Your Email Address – NIMI KINGS LTD';
+    const fallbackUrl =
+      verifyUrl || `https://www.nimikingsltd.com/auth/verify-email?code=${code}&email=${encodeURIComponent(to)}`;
+
+    const html = `
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <meta charset="utf-8">
+          <style>
+            body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #f4f7f6; margin: 0; padding: 0; color: #1e293b; }
+            .container { max-width: 600px; margin: 30px auto; background: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.06); }
+            .header { background: linear-gradient(135deg, #0f172a 0%, #1e3a8a 100%); padding: 35px 30px; text-align: center; color: #ffffff; }
+            .header h1 { margin: 0; font-size: 24px; font-weight: 700; }
+            .body { padding: 35px 30px; line-height: 1.6; }
+            .code-box { background: #f1f5f9; border: 2px dashed #3b82f6; border-radius: 8px; padding: 20px; text-align: center; margin: 25px 0; }
+            .code-digits { font-family: 'Courier New', monospace; font-size: 32px; font-weight: 800; letter-spacing: 6px; color: #1e3a8a; }
+            .btn { display: inline-block; background-color: #2563eb; color: #ffffff !important; padding: 14px 28px; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 15px; margin: 15px 0 20px; }
+            .footer { background: #f8fafc; padding: 25px 30px; text-align: center; font-size: 12px; color: #64748b; border-top: 1px solid #e2e8f0; }
+          </style>
+        </head>
+        <body>
+          <div class="container">
+            <div class="header">
+              <h1>Email Verification</h1>
+            </div>
+            <div class="body">
+              <p>Hello <strong>${name}</strong>,</p>
+              <p>Thank you for registering with <strong>NIMI KINGS LTD</strong>. To activate your account and complete your registration, please verify your email address using the 6-digit verification code below:</p>
+
+              <div class="code-box">
+                <span class="code-digits">${code}</span>
+                <p style="margin: 8px 0 0; font-size: 12px; color: #64748b;">This verification code is valid for 24 hours.</p>
+              </div>
+
+              <div style="text-align: center;">
+                <a href="${fallbackUrl}" class="btn">Verify Email Address</a>
+              </div>
+
+              <p style="font-size: 13px; color: #64748b;">If you did not register an account with NIMI KINGS LTD, please disregard this email.</p>
+            </div>
+            <div class="footer">
+              <p>© ${new Date().getFullYear()} NIMI KINGS LTD. All rights reserved.</p>
+              <p>Account Activation • <a href="mailto:support@nimikingsltd.com" style="color: #2563eb;">support@nimikingsltd.com</a></p>
+            </div>
+          </div>
+        </body>
+      </html>
+    `;
+    const text = `Hello ${name},\n\nThank you for registering with NIMI KINGS LTD. Your email verification code is:\n\n${code}\n\nOr click here to verify: ${fallbackUrl}\n\nThis code expires in 24 hours.`;
+
+    return this.sendMail({ to, subject, html, text });
+  }
+
   async sendWelcomeEmail(to: string, name: string): Promise<boolean> {
     const subject = 'Welcome to NIMI KINGS LTD – Your Real Estate Journey Begins';
     const html = `

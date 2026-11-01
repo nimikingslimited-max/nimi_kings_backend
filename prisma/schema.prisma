@@ -197,6 +197,7 @@ model User {
   userRoles         UserRole[]
   refreshTokens     RefreshToken[]
   passwordResetTokens PasswordResetToken[]
+  emailVerificationTokens EmailVerificationToken[]
   customerProfile   CustomerProfile?
   agentProfile      AgentProfile?
   propertiesCreated Property[]          @relation("PropertiesCreated")
@@ -300,6 +301,21 @@ model PasswordResetToken {
   @@index([token])
   @@index([userId])
   @@map("password_reset_tokens")
+}
+
+model EmailVerificationToken {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  token     String   @unique
+  expiresAt DateTime @map("expires_at")
+  isUsed    Boolean  @default(false) @map("is_used")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([token])
+  @@index([userId])
+  @@map("email_verification_tokens")
 }
 
 model CustomerProfile {
