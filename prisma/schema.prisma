@@ -558,7 +558,12 @@ model PropertyInspection {
   status      InspectionStatus @default(REQUESTED)
   location    String?
   notes       String?
-  completedAt DateTime?        @map("completed_at")
+  rescheduleReason    String?          @map("reschedule_reason")
+  rescheduledAt       DateTime?        @map("rescheduled_at")
+  completedAt         DateTime?        @map("completed_at")
+  customerRating      Int?             @map("customer_rating")
+  customerFeedback    String?          @map("customer_feedback")
+  feedbackSubmittedAt DateTime?        @map("feedback_submitted_at")
   createdAt   DateTime         @default(now()) @map("created_at")
   updatedAt   DateTime         @updatedAt @map("updated_at")
 

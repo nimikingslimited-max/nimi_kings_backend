@@ -11,6 +11,8 @@ import { CreateInspectionDto } from './dto/create-inspection.dto.js';
 import { UpdateInspectionDto } from './dto/update-inspection.dto.js';
 import { AssignPropertyAgentDto } from './dto/assign-property-agent.dto.js';
 import { InspectionQueryDto } from './dto/inspection-query.dto.js';
+import { RescheduleInspectionDto } from './dto/reschedule-inspection.dto.js';
+import { InspectionFeedbackDto } from './dto/inspection-feedback.dto.js';
 
 @Injectable()
 export class InspectionsService {
@@ -485,6 +487,204 @@ export class InspectionsService {
       entityId: inspection.id,
       oldValues: { status: oldStatus },
       newValues: { status: 'CANCELLED' },
+    });
+
+    return updated;
+  }
+
+  async rescheduleByCustomer(
+    id: string,
+    customerId: string,
+    dto: RescheduleInspectionDto,
+  ) {
+    const inspection = await this.prisma.propertyInspection.findUnique({
+      where: { id },
+      include: {
+        property: {
+          select: { id: true, title: true, propertyCode: true },
+        },
+        agent: {
+          select: { id: true, firstName: true, lastName: true, email: true },
+        },
+      },
+    });
+
+    if (!inspection) {
+      throw new NotFoundException(`Inspection '${id}' not found`);
+    }
+
+    if (inspection.customerId !== customerId) {
+      throw new ForbiddenException(
+        'You can only reschedule your own inspections',
+      );
+    }
+
+    if (
+      inspection.status === 'COMPLETED' ||
+      inspection.status === 'CANCELLED'
+    ) {
+      throw new BadRequestException(
+        `Cannot reschedule an inspection that is already ${inspection.status.toLowerCase()}`,
+      );
+    }
+
+    const newDate = new Date(dto.scheduledAt);
+    if (isNaN(newDate.getTime()) || newDate <= new Date()) {
+      throw new BadRequestException(
+        'Rescheduled inspection date must be in the future',
+      );
+    }
+
+    const oldScheduledAt = inspection.scheduledAt;
+
+    const updated = await this.prisma.propertyInspection.update({
+      where: { id },
+      data: {
+        scheduledAt: newDate,
+        rescheduledAt: new Date(),
+        rescheduleReason: dto.reason || null,
+        status: 'REQUESTED',
+      },
+      include: {
+        property: {
+          select: {
+            id: true,
+            title: true,
+            propertyCode: true,
+            address: true,
+            city: true,
+          },
+        },
+        agent: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+            phone: true,
+          },
+        },
+      },
+    });
+
+    // Notify assigned agent if present
+    if (inspection.agentId) {
+      await this.prisma.notification
+        .create({
+          data: {
+            userId: inspection.agentId,
+            type: 'INSPECTION_REMINDER',
+            title: 'Site Inspection Rescheduled by Customer',
+            message: `Customer rescheduled the site inspection for ${inspection.property.title} to ${newDate.toLocaleDateString()} at ${newDate.toLocaleTimeString()}.${dto.reason ? ` Reason: "${dto.reason}"` : ''}`,
+            data: {
+              inspectionId: id,
+              propertyId: inspection.propertyId,
+              newScheduledAt: newDate,
+            },
+          },
+        })
+        .catch(() => {});
+    }
+
+    await this.auditService.log({
+      userId: customerId,
+      action: 'INSPECTION_RESCHEDULED_BY_CUSTOMER',
+      entityType: 'PropertyInspection',
+      entityId: inspection.id,
+      oldValues: { scheduledAt: oldScheduledAt },
+      newValues: {
+        scheduledAt: newDate,
+        reason: dto.reason,
+      },
+    });
+
+    return updated;
+  }
+
+  async submitFeedback(
+    id: string,
+    customerId: string,
+    dto: InspectionFeedbackDto,
+  ) {
+    const inspection = await this.prisma.propertyInspection.findUnique({
+      where: { id },
+      include: {
+        property: {
+          select: { id: true, title: true, propertyCode: true },
+        },
+        agent: {
+          select: { id: true, firstName: true, lastName: true },
+        },
+      },
+    });
+
+    if (!inspection) {
+      throw new NotFoundException(`Inspection '${id}' not found`);
+    }
+
+    if (inspection.customerId !== customerId) {
+      throw new ForbiddenException(
+        'You can only submit feedback for your own inspections',
+      );
+    }
+
+    if (inspection.status !== 'COMPLETED') {
+      throw new BadRequestException(
+        'Feedback and reviews can only be submitted for completed site visits',
+      );
+    }
+
+    if (inspection.customerRating !== null) {
+      throw new BadRequestException(
+        'Feedback and rating has already been submitted for this inspection',
+      );
+    }
+
+    const updated = await this.prisma.propertyInspection.update({
+      where: { id },
+      data: {
+        customerRating: dto.rating,
+        customerFeedback: dto.feedback,
+        feedbackSubmittedAt: new Date(),
+      },
+      include: {
+        property: {
+          select: { id: true, title: true, propertyCode: true },
+        },
+        agent: {
+          select: { id: true, firstName: true, lastName: true },
+        },
+      },
+    });
+
+    // Notify agent if assigned
+    if (inspection.agentId) {
+      await this.prisma.notification
+        .create({
+          data: {
+            userId: inspection.agentId,
+            type: 'INSPECTION_REMINDER',
+            title: 'Customer Inspection Review Received',
+            message: `A customer rated your site inspection for ${inspection.property.title} with ${dto.rating}/5 stars: "${dto.feedback}"`,
+            data: {
+              inspectionId: id,
+              rating: dto.rating,
+              feedback: dto.feedback,
+            },
+          },
+        })
+        .catch(() => {});
+    }
+
+    await this.auditService.log({
+      userId: customerId,
+      action: 'INSPECTION_FEEDBACK_SUBMITTED',
+      entityType: 'PropertyInspection',
+      entityId: inspection.id,
+      newValues: {
+        customerRating: dto.rating,
+        customerFeedback: dto.feedback,
+      },
     });
 
     return updated;

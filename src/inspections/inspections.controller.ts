@@ -20,6 +20,8 @@ import { CreateInspectionDto } from './dto/create-inspection.dto.js';
 import { UpdateInspectionDto } from './dto/update-inspection.dto.js';
 import { AssignPropertyAgentDto } from './dto/assign-property-agent.dto.js';
 import { InspectionQueryDto } from './dto/inspection-query.dto.js';
+import { RescheduleInspectionDto } from './dto/reschedule-inspection.dto.js';
+import { InspectionFeedbackDto } from './dto/inspection-feedback.dto.js';
 import { Roles } from '../common/decorators/roles.decorator.js';
 import { CurrentUser } from '../common/decorators/current-user.decorator.js';
 
@@ -192,5 +194,49 @@ export class InspectionsController {
     @CurrentUser('id') customerId: string,
   ) {
     return this.inspectionsService.cancelByCustomer(id, customerId);
+  }
+
+  @Patch(':id/reschedule')
+  @ApiOperation({
+    summary:
+      'Reschedule an upcoming site inspection to a new preferred date/time (Customer self-service)',
+  })
+  @ApiResponse({
+    status: 200,
+    description:
+      'Inspection appointment date updated and status set to REQUESTED',
+  })
+  @ApiResponse({
+    status: 400,
+    description:
+      'Cannot reschedule completed/cancelled inspection or invalid future date',
+  })
+  rescheduleByCustomer(
+    @Param('id') id: string,
+    @Body() dto: RescheduleInspectionDto,
+    @CurrentUser('id') customerId: string,
+  ) {
+    return this.inspectionsService.rescheduleByCustomer(id, customerId, dto);
+  }
+
+  @Post(':id/feedback')
+  @ApiOperation({
+    summary:
+      'Submit rating (1-5 stars) and review feedback for a completed site inspection visit',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Inspection feedback and rating recorded successfully',
+  })
+  @ApiResponse({
+    status: 400,
+    description: 'Inspection not completed or feedback already submitted',
+  })
+  submitFeedback(
+    @Param('id') id: string,
+    @Body() dto: InspectionFeedbackDto,
+    @CurrentUser('id') customerId: string,
+  ) {
+    return this.inspectionsService.submitFeedback(id, customerId, dto);
   }
 }
