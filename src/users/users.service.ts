@@ -7,6 +7,8 @@ import { PrismaService } from '../common/prisma/prisma.service.js';
 import { AuditService } from '../common/audit/audit.service.js';
 import { UpdateProfileDto } from './dto/update-profile.dto.js';
 import { FavoriteQueryDto } from './dto/favorite-query.dto.js';
+import { SubmitKycDto } from './dto/submit-kyc.dto.js';
+import { ReviewKycDto, KycReviewDecision } from './dto/review-kyc.dto.js';
 
 @Injectable()
 export class UsersService {
@@ -157,6 +159,7 @@ export class UsersService {
       profile.customerProfile?.city,
       profile.customerProfile?.state,
       profile.customerProfile?.profileImage,
+      profile.customerProfile?.kycStatus === 'VERIFIED',
     ];
     const completedFields = profileFields.filter(Boolean).length;
     const profileCompletionPercentage = Math.round(
@@ -367,6 +370,7 @@ export class UsersService {
         phone: profile.phone,
         roles: profile.roles,
         profileImage: profile.customerProfile?.profileImage,
+        kycStatus: profile.customerProfile?.kycStatus || 'NOT_SUBMITTED',
         profileCompletionPercentage,
       },
       stats: {
@@ -574,6 +578,164 @@ export class UsersService {
           verification: fav.property.verification || null,
         },
       })),
+    };
+  }
+
+  // ==========================================
+  // CUSTOMER KYC & IDENTITY VERIFICATION
+  // ==========================================
+
+  async getKycStatus(userId: string) {
+    const profile = await this.prisma.customerProfile.findUnique({
+      where: { userId },
+    });
+
+    if (!profile) {
+      return {
+        kycStatus: 'NOT_SUBMITTED',
+        idType: null,
+        idNumber: null,
+        idDocumentUrl: null,
+        proofOfAddressUrl: null,
+        kycSubmittedAt: null,
+        kycReviewedAt: null,
+        kycRejectionReason: null,
+      };
+    }
+
+    return {
+      kycStatus: profile.kycStatus,
+      idType: profile.idType,
+      idNumber: profile.idNumber
+        ? `***${profile.idNumber.slice(-4)}`
+        : null,
+      idNumberFull: profile.idNumber,
+      idDocumentUrl: profile.idDocumentUrl,
+      proofOfAddressUrl: profile.proofOfAddressUrl,
+      kycSubmittedAt: profile.kycSubmittedAt,
+      kycReviewedAt: profile.kycReviewedAt,
+      kycRejectionReason: profile.kycRejectionReason,
+    };
+  }
+
+  async submitKyc(userId: string, dto: SubmitKycDto) {
+    const existing = await this.prisma.customerProfile.findUnique({
+      where: { userId },
+    });
+
+    if (existing?.kycStatus === 'VERIFIED') {
+      throw new BadRequestException(
+        'Your identity has already been verified and cannot be modified. Please contact support if you need to update documents.',
+      );
+    }
+
+    const updatedProfile = await this.prisma.customerProfile.upsert({
+      where: { userId },
+      update: {
+        idType: dto.idType,
+        idNumber: dto.idNumber,
+        idDocumentUrl: dto.idDocumentUrl,
+        proofOfAddressUrl: dto.proofOfAddressUrl || null,
+        kycStatus: 'PENDING',
+        kycSubmittedAt: new Date(),
+        kycRejectionReason: null,
+      },
+      create: {
+        userId,
+        idType: dto.idType,
+        idNumber: dto.idNumber,
+        idDocumentUrl: dto.idDocumentUrl,
+        proofOfAddressUrl: dto.proofOfAddressUrl || null,
+        kycStatus: 'PENDING',
+        kycSubmittedAt: new Date(),
+      },
+    });
+
+    await this.auditService.log({
+      userId,
+      action: 'CUSTOMER_KYC_SUBMITTED',
+      entityType: 'CustomerProfile',
+      entityId: updatedProfile.id,
+      newValues: {
+        idType: dto.idType,
+        kycStatus: 'PENDING',
+      },
+    });
+
+    return {
+      message:
+        'KYC documents submitted successfully. Our compliance team will review your submission shortly.',
+      kycStatus: updatedProfile.kycStatus,
+      idType: updatedProfile.idType,
+      kycSubmittedAt: updatedProfile.kycSubmittedAt,
+    };
+  }
+
+  async reviewKyc(
+    adminId: string,
+    customerId: string,
+    dto: ReviewKycDto,
+  ) {
+    const profile = await this.prisma.customerProfile.findUnique({
+      where: { userId: customerId },
+      include: { user: true },
+    });
+
+    if (!profile) {
+      throw new NotFoundException('Customer profile not found');
+    }
+
+    const isVerified = dto.status === KycReviewDecision.VERIFIED;
+
+    const updated = await this.prisma.customerProfile.update({
+      where: { userId: customerId },
+      data: {
+        kycStatus: isVerified ? 'VERIFIED' : 'REJECTED',
+        kycReviewedAt: new Date(),
+        kycRejectionReason: !isVerified
+          ? dto.rejectionReason || 'Documents could not be verified'
+          : null,
+      },
+    });
+
+    // Notify customer of decision
+    await this.prisma.notification
+      .create({
+        data: {
+          userId: customerId,
+          type: 'DOCUMENT_VERIFIED',
+          title: isVerified
+            ? 'KYC Identity Verified 🎉'
+            : 'KYC Verification Update',
+          message: isVerified
+            ? 'Congratulations! Your identity documents have been approved by compliance. Your account is now fully verified.'
+            : `Your KYC submission could not be verified.${dto.rejectionReason ? ` Reason: "${dto.rejectionReason}".` : ''} Please review and re-submit.`,
+          data: {
+            kycStatus: updated.kycStatus,
+            rejectionReason: updated.kycRejectionReason,
+          },
+        },
+      })
+      .catch(() => {});
+
+    await this.auditService.log({
+      userId: adminId,
+      action: isVerified
+        ? 'CUSTOMER_KYC_APPROVED'
+        : 'CUSTOMER_KYC_REJECTED',
+      entityType: 'CustomerProfile',
+      entityId: profile.id,
+      newValues: {
+        kycStatus: updated.kycStatus,
+        rejectionReason: updated.kycRejectionReason,
+      },
+    });
+
+    return {
+      message: `Customer KYC has been ${updated.kycStatus.toLowerCase()} successfully`,
+      kycStatus: updated.kycStatus,
+      reviewedAt: updated.kycReviewedAt,
+      rejectionReason: updated.kycRejectionReason,
     };
   }
 }

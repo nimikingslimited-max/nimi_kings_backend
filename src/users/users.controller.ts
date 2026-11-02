@@ -16,10 +16,14 @@ import {
   ApiBearerAuth,
   ApiParam,
 } from '@nestjs/swagger';
+import { RoleType } from '@prisma/client';
 import { UsersService } from './users.service.js';
 import { UpdateProfileDto } from './dto/update-profile.dto.js';
 import { FavoriteQueryDto } from './dto/favorite-query.dto.js';
+import { SubmitKycDto } from './dto/submit-kyc.dto.js';
+import { ReviewKycDto } from './dto/review-kyc.dto.js';
 import { CurrentUser } from '../common/decorators/current-user.decorator.js';
+import { Roles } from '../common/decorators/roles.decorator.js';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard.js';
 
 @ApiTags('User Profile & Dashboard')
@@ -160,5 +164,65 @@ export class UsersController {
     @Param('propertyId') propertyId: string,
   ) {
     return this.usersService.removeFromFavorites(userId, propertyId);
+  }
+
+  // ==========================================
+  // CUSTOMER KYC & IDENTITY VERIFICATION
+  // ==========================================
+
+  @Get('kyc')
+  @ApiOperation({
+    summary:
+      'Get customer KYC identity verification status and submitted documents',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Returns current KYC status and metadata',
+  })
+  getKycStatus(@CurrentUser('id') userId: string) {
+    return this.usersService.getKycStatus(userId);
+  }
+
+  @Post('kyc')
+  @ApiOperation({
+    summary:
+      'Submit or re-submit customer identity documents for compliance review (NIN, Drivers License, Passport, Voters Card)',
+  })
+  @ApiResponse({
+    status: 201,
+    description: 'KYC documents submitted and status set to PENDING',
+  })
+  @ApiResponse({
+    status: 400,
+    description: 'Validation failed or KYC already verified',
+  })
+  submitKyc(
+    @CurrentUser('id') userId: string,
+    @Body() dto: SubmitKycDto,
+  ) {
+    return this.usersService.submitKyc(userId, dto);
+  }
+
+  @Roles(
+    RoleType.ADMIN,
+    RoleType.SUPER_ADMIN,
+    RoleType.VERIFICATION_OFFICER,
+  )
+  @Patch('kyc/:customerId/review')
+  @ApiOperation({
+    summary:
+      'Review and approve/reject customer KYC submission (Compliance / Admin)',
+  })
+  @ApiParam({ name: 'customerId', description: 'Customer user UUID' })
+  @ApiResponse({
+    status: 200,
+    description: 'KYC status updated (VERIFIED / REJECTED)',
+  })
+  reviewKyc(
+    @CurrentUser('id') adminId: string,
+    @Param('customerId') customerId: string,
+    @Body() dto: ReviewKycDto,
+  ) {
+    return this.usersService.reviewKyc(adminId, customerId, dto);
   }
 }

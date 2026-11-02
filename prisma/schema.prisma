@@ -174,6 +174,20 @@ enum ProjectStatus {
   CANCELLED
 }
 
+enum KycStatus {
+  NOT_SUBMITTED
+  PENDING
+  VERIFIED
+  REJECTED
+}
+
+enum IdType {
+  NIN
+  DRIVERS_LICENSE
+  INTERNATIONAL_PASSPORT
+  VOTERS_CARD
+}
+
 // ==========================================
 // IDENTITY & ACCESS DOMAIN
 // ==========================================
@@ -329,6 +343,14 @@ model CustomerProfile {
   state        String?
   country      String?   @default("Nigeria")
   profileImage String?   @map("profile_image")
+  idType              IdType?   @map("id_type")
+  idNumber            String?   @map("id_number")
+  idDocumentUrl       String?   @map("id_document_url")
+  proofOfAddressUrl   String?   @map("proof_of_address_url")
+  kycStatus           KycStatus @default(NOT_SUBMITTED) @map("kyc_status")
+  kycSubmittedAt      DateTime? @map("kyc_submitted_at")
+  kycReviewedAt       DateTime? @map("kyc_reviewed_at")
+  kycRejectionReason  String?   @map("kyc_rejection_reason")
   createdAt    DateTime  @default(now()) @map("created_at")
   updatedAt    DateTime  @updatedAt @map("updated_at")
 
