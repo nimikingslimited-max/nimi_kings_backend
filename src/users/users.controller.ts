@@ -22,6 +22,7 @@ import { UpdateProfileDto } from './dto/update-profile.dto.js';
 import { FavoriteQueryDto } from './dto/favorite-query.dto.js';
 import { SubmitKycDto } from './dto/submit-kyc.dto.js';
 import { ReviewKycDto } from './dto/review-kyc.dto.js';
+import { CreateSavedSearchDto } from './dto/create-saved-search.dto.js';
 import { CurrentUser } from '../common/decorators/current-user.decorator.js';
 import { Roles } from '../common/decorators/roles.decorator.js';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard.js';
@@ -224,5 +225,71 @@ export class UsersController {
     @Body() dto: ReviewKycDto,
   ) {
     return this.usersService.reviewKyc(adminId, customerId, dto);
+  }
+
+  // ==========================================
+  // SAVED SEARCHES & PROPERTY ALERTS
+  // ==========================================
+
+  @Post('saved-searches')
+  @ApiOperation({
+    summary:
+      'Save a property search criteria preset with email/push alert preferences',
+  })
+  @ApiResponse({
+    status: 201,
+    description: 'Saved search preset created successfully',
+  })
+  createSavedSearch(
+    @CurrentUser('id') userId: string,
+    @Body() dto: CreateSavedSearchDto,
+  ) {
+    return this.usersService.createSavedSearch(userId, dto);
+  }
+
+  @Get('saved-searches')
+  @ApiOperation({
+    summary: 'List all saved searches and alerts for authenticated customer',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'List of customer saved searches',
+  })
+  getSavedSearches(@CurrentUser('id') userId: string) {
+    return this.usersService.getSavedSearches(userId);
+  }
+
+  @Get('saved-searches/:id/matches')
+  @ApiOperation({
+    summary:
+      'Run a saved search preset on demand and get latest matching properties',
+  })
+  @ApiParam({ name: 'id', description: 'Saved search UUID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Matching properties for the saved search criteria',
+  })
+  getSavedSearchMatches(
+    @CurrentUser('id') userId: string,
+    @Param('id') id: string,
+    @Query('limit') limit?: number,
+  ) {
+    return this.usersService.getSavedSearchMatches(userId, id, limit);
+  }
+
+  @Delete('saved-searches/:id')
+  @ApiOperation({
+    summary: 'Delete a saved search preset',
+  })
+  @ApiParam({ name: 'id', description: 'Saved search UUID to delete' })
+  @ApiResponse({
+    status: 200,
+    description: 'Saved search deleted successfully',
+  })
+  deleteSavedSearch(
+    @CurrentUser('id') userId: string,
+    @Param('id') id: string,
+  ) {
+    return this.usersService.deleteSavedSearch(userId, id);
   }
 }

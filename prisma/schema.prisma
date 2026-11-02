@@ -228,6 +228,7 @@ model User {
   conversationParticipants ConversationParticipant[]
   notifications     Notification[]
   savedProperties   SavedProperty[]
+  savedSearches     SavedSearch[]
   transactionsCustomer Transaction[]    @relation("CustomerTransactions")
   transactionsAgent    Transaction[]    @relation("AgentTransactions")
   projectsManaged   ConstructionProject[] @relation("ProjectManager")
@@ -471,6 +472,30 @@ model SavedProperty {
   @@index([userId])
   @@index([propertyId])
   @@map("saved_properties")
+}
+
+model SavedSearch {
+  id            String        @id @default(uuid())
+  userId        String        @map("user_id")
+  title         String
+  propertyType  PropertyType? @map("property_type")
+  listingType   ListingType?  @map("listing_type")
+  city          String?
+  state         String?
+  minPrice      Decimal?      @map("min_price") @db.Decimal(15, 2)
+  maxPrice      Decimal?      @map("max_price") @db.Decimal(15, 2)
+  bedrooms      Int?
+  bathrooms     Int?
+  notifyEmail   Boolean       @default(true) @map("notify_email")
+  notifyPush    Boolean       @default(true) @map("notify_push")
+  lastAlertedAt DateTime?     @map("last_alerted_at")
+  createdAt     DateTime      @default(now()) @map("created_at")
+  updatedAt     DateTime      @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("saved_searches")
 }
 
 model Feature {

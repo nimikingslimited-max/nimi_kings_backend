@@ -3,12 +3,14 @@ import {
   NotFoundException,
   BadRequestException,
 } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../common/prisma/prisma.service.js';
 import { AuditService } from '../common/audit/audit.service.js';
 import { UpdateProfileDto } from './dto/update-profile.dto.js';
 import { FavoriteQueryDto } from './dto/favorite-query.dto.js';
 import { SubmitKycDto } from './dto/submit-kyc.dto.js';
 import { ReviewKycDto, KycReviewDecision } from './dto/review-kyc.dto.js';
+import { CreateSavedSearchDto } from './dto/create-saved-search.dto.js';
 
 @Injectable()
 export class UsersService {
@@ -736,6 +738,198 @@ export class UsersService {
       kycStatus: updated.kycStatus,
       reviewedAt: updated.kycReviewedAt,
       rejectionReason: updated.kycRejectionReason,
+    };
+  }
+
+  // ==========================================
+  // SAVED SEARCHES & PROPERTY ALERTS
+  // ==========================================
+
+  async createSavedSearch(userId: string, dto: CreateSavedSearchDto) {
+    const savedSearch = await this.prisma.savedSearch.create({
+      data: {
+        userId,
+        title: dto.title,
+        propertyType: dto.propertyType,
+        listingType: dto.listingType,
+        city: dto.city,
+        state: dto.state,
+        minPrice: dto.minPrice !== undefined ? new Prisma.Decimal(dto.minPrice) : null,
+        maxPrice: dto.maxPrice !== undefined ? new Prisma.Decimal(dto.maxPrice) : null,
+        bedrooms: dto.bedrooms,
+        bathrooms: dto.bathrooms,
+        notifyEmail: dto.notifyEmail !== undefined ? dto.notifyEmail : true,
+        notifyPush: dto.notifyPush !== undefined ? dto.notifyPush : true,
+      },
+    });
+
+    await this.auditService.log({
+      userId,
+      action: 'SAVED_SEARCH_CREATED',
+      entityType: 'SavedSearch',
+      entityId: savedSearch.id,
+      newValues: {
+        title: dto.title,
+        city: dto.city,
+        state: dto.state,
+      },
+    });
+
+    return savedSearch;
+  }
+
+  async getSavedSearches(userId: string) {
+    const list = await this.prisma.savedSearch.findMany({
+      where: { userId },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    return {
+      count: list.length,
+      data: list,
+    };
+  }
+
+  async deleteSavedSearch(userId: string, searchId: string) {
+    const existing = await this.prisma.savedSearch.findFirst({
+      where: { id: searchId, userId },
+    });
+
+    if (!existing) {
+      throw new NotFoundException('Saved search not found');
+    }
+
+    await this.prisma.savedSearch.delete({
+      where: { id: searchId },
+    });
+
+    return { message: 'Saved search deleted successfully' };
+  }
+
+  async getSavedSearchMatches(
+    userId: string,
+    searchId: string,
+    limit = 10,
+  ) {
+    const savedSearch = await this.prisma.savedSearch.findFirst({
+      where: { id: searchId, userId },
+    });
+
+    if (!savedSearch) {
+      throw new NotFoundException('Saved search not found');
+    }
+
+    // Build dynamic Prisma query filter matching the saved search criteria
+    const where: any = {
+      deletedAt: null,
+    };
+
+    if (savedSearch.propertyType) {
+      where.propertyType = savedSearch.propertyType;
+    }
+
+    if (savedSearch.city) {
+      where.city = { contains: savedSearch.city, mode: 'insensitive' };
+    }
+
+    if (savedSearch.state) {
+      where.state = { contains: savedSearch.state, mode: 'insensitive' };
+    }
+
+    if (savedSearch.bedrooms) {
+      where.bedrooms = { gte: savedSearch.bedrooms };
+    }
+
+    if (savedSearch.bathrooms) {
+      where.bathrooms = { gte: savedSearch.bathrooms };
+    }
+
+    const listingConditions: any = {
+      status: 'PUBLISHED',
+    };
+
+    if (savedSearch.listingType) {
+      listingConditions.listingType = savedSearch.listingType;
+    }
+
+    if (savedSearch.minPrice || savedSearch.maxPrice) {
+      listingConditions.price = {};
+      if (savedSearch.minPrice) {
+        listingConditions.price.gte = savedSearch.minPrice;
+      }
+      if (savedSearch.maxPrice) {
+        listingConditions.price.lte = savedSearch.maxPrice;
+      }
+    }
+
+    where.listings = {
+      some: listingConditions,
+    };
+
+    const [totalMatches, properties] = await Promise.all([
+      this.prisma.property.count({ where }),
+      this.prisma.property.findMany({
+        where,
+        take: Math.max(1, Math.min(50, Number(limit) || 10)),
+        orderBy: { createdAt: 'desc' },
+        include: {
+          media: {
+            where: { isPrimary: true },
+            take: 1,
+            select: { url: true, thumbnailUrl: true },
+          },
+          listings: {
+            where: { status: 'PUBLISHED' },
+            take: 1,
+            select: {
+              id: true,
+              price: true,
+              currency: true,
+              listingType: true,
+              status: true,
+            },
+          },
+          verification: {
+            select: {
+              status: true,
+              riskLevel: true,
+              completedAt: true,
+            },
+          },
+        },
+      }),
+    ]);
+
+    return {
+      savedSearch: {
+        id: savedSearch.id,
+        title: savedSearch.title,
+        criteria: {
+          propertyType: savedSearch.propertyType,
+          listingType: savedSearch.listingType,
+          city: savedSearch.city,
+          state: savedSearch.state,
+          minPrice: savedSearch.minPrice,
+          maxPrice: savedSearch.maxPrice,
+          bedrooms: savedSearch.bedrooms,
+          bathrooms: savedSearch.bathrooms,
+        },
+      },
+      totalMatches,
+      data: properties.map((p) => ({
+        id: p.id,
+        propertyCode: p.propertyCode,
+        title: p.title,
+        propertyType: p.propertyType,
+        address: p.address,
+        city: p.city,
+        state: p.state,
+        bedrooms: p.bedrooms,
+        bathrooms: p.bathrooms,
+        primaryMedia: p.media[0] || null,
+        activeListing: p.listings[0] || null,
+        verification: p.verification || null,
+      })),
     };
   }
 }
