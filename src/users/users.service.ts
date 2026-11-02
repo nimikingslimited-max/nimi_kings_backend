@@ -3,6 +3,7 @@ import {
   NotFoundException,
   BadRequestException,
 } from '@nestjs/common';
+import bcrypt from 'bcryptjs';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../common/prisma/prisma.service.js';
 import { AuditService } from '../common/audit/audit.service.js';
@@ -11,6 +12,7 @@ import { FavoriteQueryDto } from './dto/favorite-query.dto.js';
 import { SubmitKycDto } from './dto/submit-kyc.dto.js';
 import { ReviewKycDto, KycReviewDecision } from './dto/review-kyc.dto.js';
 import { CreateSavedSearchDto } from './dto/create-saved-search.dto.js';
+import { DeactivateAccountDto } from './dto/deactivate-account.dto.js';
 
 @Injectable()
 export class UsersService {
@@ -930,6 +932,56 @@ export class UsersService {
         activeListing: p.listings[0] || null,
         verification: p.verification || null,
       })),
+    };
+  }
+
+  // ==========================================
+  // ACCOUNT SETTINGS & DEACTIVATION
+  // ==========================================
+
+  async deactivateAccount(userId: string, dto: DeactivateAccountDto) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+    });
+
+    if (!user) {
+      throw new NotFoundException('User account not found');
+    }
+
+    const isMatch = await bcrypt.compare(dto.password, user.passwordHash);
+    if (!isMatch) {
+      throw new BadRequestException('Incorrect password provided');
+    }
+
+    // In transaction: update user status to DEACTIVATED and revoke all active refresh tokens
+    await this.prisma.$transaction([
+      this.prisma.user.update({
+        where: { id: userId },
+        data: {
+          status: 'DEACTIVATED',
+          deletedAt: new Date(),
+        },
+      }),
+      this.prisma.refreshToken.updateMany({
+        where: { userId, isRevoked: false },
+        data: { isRevoked: true },
+      }),
+    ]);
+
+    await this.auditService.log({
+      userId,
+      action: 'USER_ACCOUNT_DEACTIVATED',
+      entityType: 'User',
+      entityId: userId,
+      newValues: {
+        status: 'DEACTIVATED',
+        reason: dto.reason || null,
+      },
+    });
+
+    return {
+      message:
+        'Your account has been deactivated successfully and all active sessions have been terminated. We hope to see you again.',
     };
   }
 }

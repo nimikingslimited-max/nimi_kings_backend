@@ -7,6 +7,8 @@ import {
   Body,
   Param,
   Query,
+  HttpCode,
+  HttpStatus,
   UseGuards,
 } from '@nestjs/common';
 import {
@@ -23,6 +25,7 @@ import { FavoriteQueryDto } from './dto/favorite-query.dto.js';
 import { SubmitKycDto } from './dto/submit-kyc.dto.js';
 import { ReviewKycDto } from './dto/review-kyc.dto.js';
 import { CreateSavedSearchDto } from './dto/create-saved-search.dto.js';
+import { DeactivateAccountDto } from './dto/deactivate-account.dto.js';
 import { CurrentUser } from '../common/decorators/current-user.decorator.js';
 import { Roles } from '../common/decorators/roles.decorator.js';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard.js';
@@ -291,5 +294,30 @@ export class UsersController {
     @Param('id') id: string,
   ) {
     return this.usersService.deleteSavedSearch(userId, id);
+  }
+
+  // ==========================================
+  // ACCOUNT SETTINGS & DEACTIVATION
+  // ==========================================
+
+  @Post('deactivate-account')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Self-service account deactivation (requires password confirmation, revokes all sessions, and marks account DEACTIVATED)',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Account deactivated successfully',
+  })
+  @ApiResponse({
+    status: 400,
+    description: 'Incorrect password',
+  })
+  deactivateAccount(
+    @CurrentUser('id') userId: string,
+    @Body() dto: DeactivateAccountDto,
+  ) {
+    return this.usersService.deactivateAccount(userId, dto);
   }
 }

@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
+import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import { RoleType } from '@prisma/client';
 import { PrismaService } from '../common/prisma/prisma.service.js';
@@ -140,7 +141,11 @@ export class AuthService {
     };
   }
 
-  async login(dto: LoginDto) {
+  async login(
+    dto: LoginDto,
+    userAgent?: string,
+    ipAddress?: string,
+  ) {
     const user = await this.prisma.user.findUnique({
       where: { email: dto.email.toLowerCase() },
       include: {
@@ -176,7 +181,12 @@ export class AuthService {
     const roles = user.userRoles.map((ur) => ur.role.name);
     const tokens = await this.generateTokens(user.id, user.email, roles);
 
-    await this.storeRefreshToken(user.id, tokens.refreshToken);
+    await this.storeRefreshToken(
+      user.id,
+      tokens.refreshToken,
+      userAgent,
+      ipAddress,
+    );
 
     await this.prisma.user.update({
       where: { id: user.id },
@@ -197,7 +207,11 @@ export class AuthService {
     };
   }
 
-  async refreshTokens(refreshToken: string) {
+  async refreshTokens(
+    refreshToken: string,
+    userAgent?: string,
+    ipAddress?: string,
+  ) {
     try {
       const refreshSecret =
         this.configService.get<string>('JWT_REFRESH_SECRET') ||
@@ -215,9 +229,6 @@ export class AuthService {
               role: true,
             },
           },
-          refreshTokens: {
-            where: { isRevoked: false },
-          },
         },
       });
 
@@ -225,20 +236,18 @@ export class AuthService {
         throw new UnauthorizedException('Invalid token or inactive user');
       }
 
-      // Check if matching refresh token exists
-      let matchedTokenRecord = null;
-      for (const tokenRecord of user.refreshTokens) {
-        const isMatch = await bcrypt.compare(
-          refreshToken,
-          tokenRecord.tokenHash,
-        );
-        if (isMatch) {
-          matchedTokenRecord = tokenRecord;
-          break;
-        }
-      }
+      const incomingHash = this.hashToken(refreshToken);
 
-      if (!matchedTokenRecord || matchedTokenRecord.expiresAt < new Date()) {
+      const matchedTokenRecord = await this.prisma.refreshToken.findFirst({
+        where: {
+          userId: user.id,
+          tokenHash: incomingHash,
+          isRevoked: false,
+          expiresAt: { gt: new Date() },
+        },
+      });
+
+      if (!matchedTokenRecord) {
         throw new UnauthorizedException('Invalid or expired refresh token');
       }
 
@@ -251,7 +260,12 @@ export class AuthService {
       const roles = user.userRoles.map((ur) => ur.role.name);
       const newTokens = await this.generateTokens(user.id, user.email, roles);
 
-      await this.storeRefreshToken(user.id, newTokens.refreshToken);
+      await this.storeRefreshToken(
+        user.id,
+        newTokens.refreshToken,
+        userAgent || matchedTokenRecord.userAgent,
+        ipAddress || matchedTokenRecord.ipAddress,
+      );
 
       return {
         message: 'Tokens refreshed successfully',
@@ -271,7 +285,11 @@ export class AuthService {
     return { message: 'Logged out successfully' };
   }
 
-  async verifyEmail(dto: VerifyEmailDto) {
+  async verifyEmail(
+    dto: VerifyEmailDto,
+    userAgent?: string,
+    ipAddress?: string,
+  ) {
     const user = await this.prisma.user.findUnique({
       where: { email: dto.email.toLowerCase() },
       include: {
@@ -332,7 +350,12 @@ export class AuthService {
     // Generate tokens so user is immediately logged in upon email verification
     const roles = user.userRoles.map((ur) => ur.role.name);
     const tokens = await this.generateTokens(user.id, user.email, roles);
-    await this.storeRefreshToken(user.id, tokens.refreshToken);
+    await this.storeRefreshToken(
+      user.id,
+      tokens.refreshToken,
+      userAgent,
+      ipAddress,
+    );
 
     return {
       message: 'Email verified successfully. Your account is now active.',
@@ -522,7 +545,13 @@ export class AuthService {
     email: string,
     roles: string[],
   ) {
-    const payload = { sub: userId, email, roles };
+    const accessPayload = { sub: userId, email, roles };
+    const refreshPayload = {
+      sub: userId,
+      email,
+      roles,
+      jti: crypto.randomUUID(),
+    };
 
     const accessSecret =
       this.configService.get<string>('JWT_ACCESS_SECRET') ||
@@ -537,11 +566,11 @@ export class AuthService {
       this.configService.get<string>('JWT_REFRESH_EXPIRATION') || '7d';
 
     const [accessToken, refreshToken] = await Promise.all([
-      this.jwtService.signAsync(payload, {
+      this.jwtService.signAsync(accessPayload, {
         secret: accessSecret,
         expiresIn: accessExpiration as any,
       }),
-      this.jwtService.signAsync(payload, {
+      this.jwtService.signAsync(refreshPayload, {
         secret: refreshSecret,
         expiresIn: refreshExpiration as any,
       }),
@@ -555,19 +584,103 @@ export class AuthService {
     };
   }
 
-  private async storeRefreshToken(userId: string, refreshToken: string) {
-    const salt = await bcrypt.genSalt(10);
-    const tokenHash = await bcrypt.hash(refreshToken, salt);
+  private hashToken(token: string): string {
+    return crypto.createHash('sha256').update(token).digest('hex');
+  }
+
+  private async storeRefreshToken(
+    userId: string,
+    refreshToken: string,
+    userAgent?: string | null,
+    ipAddress?: string | null,
+  ) {
+    const tokenHash = this.hashToken(refreshToken);
 
     const expiresAt = new Date();
     expiresAt.setDate(expiresAt.getDate() + 7);
 
-    await this.prisma.refreshToken.create({
+    return this.prisma.refreshToken.create({
       data: {
         userId,
         tokenHash,
+        userAgent: userAgent || null,
+        ipAddress: ipAddress || null,
+        lastUsedAt: new Date(),
         expiresAt,
       },
     });
+  }
+
+  // ==========================================
+  // SESSION MANAGEMENT
+  // ==========================================
+
+  async getActiveSessions(userId: string) {
+    const sessions = await this.prisma.refreshToken.findMany({
+      where: {
+        userId,
+        isRevoked: false,
+        expiresAt: { gt: new Date() },
+      },
+      orderBy: { createdAt: 'desc' },
+      select: {
+        id: true,
+        userAgent: true,
+        ipAddress: true,
+        lastUsedAt: true,
+        createdAt: true,
+        expiresAt: true,
+      },
+    });
+
+    return {
+      count: sessions.length,
+      data: sessions.map((s) => ({
+        id: s.id,
+        device: s.userAgent || 'Unknown Device',
+        ipAddress: s.ipAddress || 'Unknown IP',
+        createdAt: s.createdAt,
+        lastUsedAt: s.lastUsedAt || s.createdAt,
+        expiresAt: s.expiresAt,
+      })),
+    };
+  }
+
+  async revokeSession(userId: string, sessionId: string) {
+    const session = await this.prisma.refreshToken.findFirst({
+      where: { id: sessionId, userId },
+    });
+
+    if (!session || session.isRevoked) {
+      throw new NotFoundException('Session not found or already revoked');
+    }
+
+    await this.prisma.refreshToken.update({
+      where: { id: sessionId },
+      data: { isRevoked: true },
+    });
+
+    return { message: 'Session successfully revoked' };
+  }
+
+  async revokeOtherSessions(userId: string, currentSessionId?: string) {
+    const where: any = {
+      userId,
+      isRevoked: false,
+    };
+
+    if (currentSessionId) {
+      where.id = { not: currentSessionId };
+    }
+
+    const result = await this.prisma.refreshToken.updateMany({
+      where,
+      data: { isRevoked: true },
+    });
+
+    return {
+      message: `Revoked ${result.count} other active session(s)`,
+      revokedCount: result.count,
+    };
   }
 }

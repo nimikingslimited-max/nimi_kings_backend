@@ -2,8 +2,12 @@ import {
   Controller,
   Post,
   Patch,
+  Delete,
+  Param,
   Body,
   Get,
+  Headers,
+  Ip,
   HttpCode,
   HttpStatus,
   UseGuards,
@@ -13,6 +17,7 @@ import {
   ApiOperation,
   ApiResponse,
   ApiBearerAuth,
+  ApiParam,
 } from '@nestjs/swagger';
 import { AuthService } from './auth.service.js';
 import { RegisterDto } from './dto/register.dto.js';
@@ -67,8 +72,12 @@ export class AuthController {
     status: 400,
     description: 'Invalid or expired verification code',
   })
-  async verifyEmail(@Body() dto: VerifyEmailDto) {
-    return this.authService.verifyEmail(dto);
+  async verifyEmail(
+    @Body() dto: VerifyEmailDto,
+    @Headers('user-agent') userAgent?: string,
+    @Ip() ip?: string,
+  ) {
+    return this.authService.verifyEmail(dto, userAgent, ip);
   }
 
   @Public()
@@ -95,8 +104,12 @@ export class AuthController {
     description: 'Login successful with access & refresh tokens',
   })
   @ApiResponse({ status: 401, description: 'Invalid email or password' })
-  async login(@Body() dto: LoginDto) {
-    return this.authService.login(dto);
+  async login(
+    @Body() dto: LoginDto,
+    @Headers('user-agent') userAgent?: string,
+    @Ip() ip?: string,
+  ) {
+    return this.authService.login(dto, userAgent, ip);
   }
 
   @Public()
@@ -107,8 +120,12 @@ export class AuthController {
   })
   @ApiResponse({ status: 200, description: 'Tokens rotated successfully' })
   @ApiResponse({ status: 401, description: 'Invalid or expired refresh token' })
-  async refreshTokens(@Body() dto: RefreshTokenDto) {
-    return this.authService.refreshTokens(dto.refreshToken);
+  async refreshTokens(
+    @Body() dto: RefreshTokenDto,
+    @Headers('user-agent') userAgent?: string,
+    @Ip() ip?: string,
+  ) {
+    return this.authService.refreshTokens(dto.refreshToken, userAgent, ip);
   }
 
   @Public()
@@ -192,5 +209,56 @@ export class AuthController {
     return {
       user,
     };
+  }
+
+  // ==========================================
+  // SESSION MANAGEMENT
+  // ==========================================
+
+  @UseGuards(JwtAuthGuard)
+  @Get('sessions')
+  @ApiBearerAuth('JWT-auth')
+  @ApiOperation({
+    summary: 'Get all active login sessions / devices for authenticated user',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'List of active sessions with device and IP information',
+  })
+  getActiveSessions(@CurrentUser('id') userId: string) {
+    return this.authService.getActiveSessions(userId);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Delete('sessions/:sessionId')
+  @ApiBearerAuth('JWT-auth')
+  @ApiOperation({
+    summary: 'Remotely revoke a specific active login session',
+  })
+  @ApiParam({ name: 'sessionId', description: 'Refresh token session UUID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Session revoked successfully',
+  })
+  revokeSession(
+    @CurrentUser('id') userId: string,
+    @Param('sessionId') sessionId: string,
+  ) {
+    return this.authService.revokeSession(userId, sessionId);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Post('revoke-other-sessions')
+  @HttpCode(HttpStatus.OK)
+  @ApiBearerAuth('JWT-auth')
+  @ApiOperation({
+    summary: 'Revoke all other active sessions and log out of all other devices',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'All other sessions revoked successfully',
+  })
+  revokeOtherSessions(@CurrentUser('id') userId: string) {
+    return this.authService.revokeOtherSessions(userId);
   }
 }
