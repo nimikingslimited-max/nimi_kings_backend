@@ -4,6 +4,7 @@ import {
   UnauthorizedException,
   BadRequestException,
   NotFoundException,
+  Logger,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
@@ -22,6 +23,8 @@ import { ResendVerificationDto } from './dto/resend-verification.dto.js';
 
 @Injectable()
 export class AuthService {
+  private readonly logger = new Logger(AuthService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly jwtService: JwtService,
@@ -123,7 +126,9 @@ export class AuthService {
     this.emailService
       .sendEmailVerificationCode(user.email, user.firstName, verificationCode)
       .catch((err) => {
-        // Non-blocking error handling
+        this.logger.error(
+          `Failed to dispatch verification email to ${user.email}: ${err.message}`,
+        );
       });
 
     return {
@@ -345,7 +350,11 @@ export class AuthService {
     // Send Welcome Email once email is verified
     this.emailService
       .sendWelcomeEmail(user.email, user.firstName)
-      .catch(() => {});
+      .catch((err) => {
+        this.logger.error(
+          `Failed to dispatch welcome email to ${user.email}: ${err.message}`,
+        );
+      });
 
     // Generate tokens so user is immediately logged in upon email verification
     const roles = user.userRoles.map((ur) => ur.role.name);
@@ -404,7 +413,11 @@ export class AuthService {
 
       this.emailService
         .sendEmailVerificationCode(user.email, user.firstName, code)
-        .catch(() => {});
+        .catch((err) => {
+          this.logger.error(
+            `Failed to resend verification email to ${user.email}: ${err.message}`,
+          );
+        });
     }
 
     return {
@@ -440,7 +453,11 @@ export class AuthService {
       // Send the email with the reset code
       this.emailService
         .sendPasswordResetEmail(user.email, user.firstName, token)
-        .catch(() => {});
+        .catch((err) => {
+          this.logger.error(
+            `Failed to dispatch password reset email to ${user.email}: ${err.message}`,
+          );
+        });
     }
 
     // Always return a generic success response to prevent email enumeration
@@ -532,7 +549,11 @@ export class AuthService {
 
     this.emailService
       .sendPasswordChangedAlert(user.email, user.firstName)
-      .catch(() => {});
+      .catch((err) => {
+        this.logger.error(
+          `Failed to dispatch password changed security alert to ${user.email}: ${err.message}`,
+        );
+      });
 
     return {
       message:
@@ -682,5 +703,13 @@ export class AuthService {
       message: `Revoked ${result.count} other active session(s)`,
       revokedCount: result.count,
     };
+  }
+
+  // ==========================================
+  // EMAIL HEALTH & SYSTEM VERIFICATION
+  // ==========================================
+
+  async testEmail(email: string) {
+    return this.emailService.sendTestEmail(email);
   }
 }

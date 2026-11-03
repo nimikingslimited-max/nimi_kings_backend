@@ -28,6 +28,7 @@ import { ResetPasswordDto } from './dto/reset-password.dto.js';
 import { ChangePasswordDto } from './dto/change-password.dto.js';
 import { VerifyEmailDto } from './dto/verify-email.dto.js';
 import { ResendVerificationDto } from './dto/resend-verification.dto.js';
+import { TestEmailDto } from './dto/test-email.dto.js';
 import { Public } from '../common/decorators/public.decorator.js';
 import { CurrentUser } from '../common/decorators/current-user.decorator.js';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard.js';
@@ -260,5 +261,21 @@ export class AuthController {
   })
   revokeOtherSessions(@CurrentUser('id') userId: string) {
     return this.authService.revokeOtherSessions(userId);
+  }
+
+  @Public()
+  @Post('test-email')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Test email delivery subsystem',
+    description:
+      'Dispatches a test verification email to confirm that SMTP credentials and delivery are active.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Email test result with delivery status or dev console simulation',
+  })
+  testEmail(@Body() dto: TestEmailDto) {
+    return this.authService.testEmail(dto.email);
   }
 }
