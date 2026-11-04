@@ -368,6 +368,10 @@ model AgentProfile {
   userId        String   @unique @map("user_id")
   agentCode     String   @unique @map("agent_code")
   licenseNumber String?  @map("license_number")
+  agencyName    String?  @map("agency_name")
+  specialties   String?
+  yearsOfExperience Int? @map("years_of_experience")
+  officeAddress String?  @map("office_address")
   bio           String?
   profileImage  String?  @map("profile_image")
   joinedAt      DateTime @default(now()) @map("joined_at")
@@ -586,6 +590,7 @@ model PropertyEnquiry {
   agentId    String?       @map("agent_id")
   type       EnquiryType   @default(GENERAL_ENQUIRY)
   message    String
+  agentNotes String?       @map("agent_notes")
   status     EnquiryStatus @default(NEW)
   createdAt  DateTime      @default(now()) @map("created_at")
   updatedAt  DateTime      @updatedAt @map("updated_at")
@@ -614,6 +619,8 @@ model PropertyInspection {
   customerRating      Int?             @map("customer_rating")
   customerFeedback    String?          @map("customer_feedback")
   feedbackSubmittedAt DateTime?        @map("feedback_submitted_at")
+  agentReport         String?          @map("agent_report")
+  outcome             String?
   createdAt   DateTime         @default(now()) @map("created_at")
   updatedAt   DateTime         @updatedAt @map("updated_at")
 

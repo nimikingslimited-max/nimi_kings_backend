@@ -85,6 +85,25 @@ export class UsersController {
     return this.usersService.getCustomerDashboard(userId);
   }
 
+  @Get('agent/dashboard')
+  @Roles(RoleType.AGENT, RoleType.ADMIN, RoleType.SUPER_ADMIN)
+  @ApiOperation({
+    summary:
+      'Get comprehensive Agent Dashboard analytics (assigned properties, leads pipeline, today & upcoming inspections, customer reviews, performance KPIs)',
+  })
+  @ApiResponse({
+    status: 200,
+    description:
+      'Aggregated agent metrics, today visits, urgent leads, and portfolio preview',
+  })
+  @ApiResponse({
+    status: 403,
+    description: 'Forbidden - Agent or Admin role required',
+  })
+  getAgentDashboard(@CurrentUser('id') userId: string) {
+    return this.usersService.getAgentDashboard(userId);
+  }
+
   @Get('my-agent')
   @ApiOperation({
     summary:

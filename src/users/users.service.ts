@@ -410,6 +410,496 @@ export class UsersService {
     };
   }
 
+  async getAgentDashboard(userId: string) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      include: {
+        agentProfile: true,
+        userRoles: { include: { role: true } },
+      },
+    });
+
+    if (!user) {
+      throw new NotFoundException('User account not found');
+    }
+
+    const roles = user.userRoles.map((ur) => ur.role.name);
+
+    // If agentProfile doesn't exist, create an auto-generated one
+    let agentProfile = user.agentProfile;
+    if (!agentProfile) {
+      const agentCode = `NK-AG-${Math.floor(1000 + Math.random() * 9000)}`;
+      agentProfile = await this.prisma.agentProfile.create({
+        data: {
+          userId,
+          agentCode,
+        },
+      });
+    }
+
+    // 1. Identify all property IDs assigned to or created by this agent
+    const [assignedProps, createdProps] = await Promise.all([
+      this.prisma.propertyAgent.findMany({
+        where: { agentId: userId, status: 'ACTIVE' },
+        select: { propertyId: true },
+      }),
+      this.prisma.property.findMany({
+        where: { createdById: userId, deletedAt: null },
+        select: { id: true },
+      }),
+    ]);
+
+    const propertyIds = Array.from(
+      new Set([
+        ...assignedProps.map((p) => p.propertyId),
+        ...createdProps.map((p) => p.id),
+      ]),
+    );
+
+    const now = new Date();
+    const startOfToday = new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      now.getDate(),
+    );
+    const endOfToday = new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      now.getDate(),
+      23,
+      59,
+      59,
+      999,
+    );
+
+    const totalPropertiesCount = propertyIds.length;
+
+    // 2. Parallel Metrics Execution
+    const [
+      activePropertiesCount,
+      totalAssignedLeads,
+      newLeadsCount,
+      inProgressLeadsCount,
+      resolvedLeadsCount,
+      totalInspectionsCount,
+      todayInspectionsCount,
+      upcomingInspectionsCount,
+      completedInspectionsCount,
+      rescheduledInspectionsCount,
+      assignedClientsCount,
+      successfulTransactions,
+      unreadNotificationsCount,
+      activeConversationsCount,
+    ] = await Promise.all([
+      this.prisma.property.count({
+        where: {
+          id: { in: propertyIds },
+          deletedAt: null,
+          listings: { some: { status: 'PUBLISHED' } },
+        },
+      }),
+      this.prisma.propertyEnquiry.count({ where: { agentId: userId } }),
+      this.prisma.propertyEnquiry.count({
+        where: { agentId: userId, status: 'NEW' },
+      }),
+      this.prisma.propertyEnquiry.count({
+        where: { agentId: userId, status: 'IN_PROGRESS' },
+      }),
+      this.prisma.propertyEnquiry.count({
+        where: { agentId: userId, status: { in: ['RESOLVED', 'CLOSED'] } },
+      }),
+      this.prisma.propertyInspection.count({ where: { agentId: userId } }),
+      this.prisma.propertyInspection.count({
+        where: {
+          agentId: userId,
+          scheduledAt: { gte: startOfToday, lte: endOfToday },
+          status: { in: ['REQUESTED', 'SCHEDULED', 'CONFIRMED'] },
+        },
+      }),
+      this.prisma.propertyInspection.count({
+        where: {
+          agentId: userId,
+          scheduledAt: { gt: endOfToday },
+          status: { in: ['REQUESTED', 'SCHEDULED', 'CONFIRMED'] },
+        },
+      }),
+      this.prisma.propertyInspection.count({
+        where: { agentId: userId, status: 'COMPLETED' },
+      }),
+      this.prisma.propertyInspection.count({
+        where: { agentId: userId, rescheduledAt: { not: null } },
+      }),
+      this.prisma.customerAgent.count({
+        where: { agentId: userId, status: 'ACTIVE' },
+      }),
+      this.prisma.transaction.findMany({
+        where: { agentId: userId, status: 'SUCCESSFUL' },
+        select: { amount: true, currency: true },
+      }),
+      this.prisma.notification.count({
+        where: { userId, readAt: null },
+      }),
+      this.prisma.conversationParticipant.count({
+        where: { userId },
+      }),
+    ]);
+
+    // 3. Parallel Actionable Widgets & Feeds
+    const [
+      todayVisits,
+      upcomingVisits,
+      urgentLeads,
+      myPropertiesPreview,
+      reviews,
+    ] = await Promise.all([
+      this.prisma.propertyInspection.findMany({
+        where: {
+          agentId: userId,
+          scheduledAt: { gte: startOfToday, lte: endOfToday },
+          status: { in: ['REQUESTED', 'SCHEDULED', 'CONFIRMED'] },
+        },
+        orderBy: { scheduledAt: 'asc' },
+        include: {
+          property: {
+            select: {
+              id: true,
+              propertyCode: true,
+              title: true,
+              propertyType: true,
+              address: true,
+              city: true,
+              state: true,
+              media: {
+                where: { isPrimary: true },
+                take: 1,
+                select: { url: true, thumbnailUrl: true },
+              },
+            },
+          },
+          customer: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              email: true,
+              phone: true,
+              customerProfile: {
+                select: { profileImage: true },
+              },
+            },
+          },
+        },
+      }),
+      this.prisma.propertyInspection.findMany({
+        where: {
+          agentId: userId,
+          scheduledAt: { gt: endOfToday },
+          status: { in: ['REQUESTED', 'SCHEDULED', 'CONFIRMED'] },
+        },
+        orderBy: { scheduledAt: 'asc' },
+        take: 5,
+        include: {
+          property: {
+            select: {
+              id: true,
+              propertyCode: true,
+              title: true,
+              propertyType: true,
+              address: true,
+              city: true,
+              state: true,
+              media: {
+                where: { isPrimary: true },
+                take: 1,
+                select: { url: true, thumbnailUrl: true },
+              },
+            },
+          },
+          customer: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              email: true,
+              phone: true,
+              customerProfile: {
+                select: { profileImage: true },
+              },
+            },
+          },
+        },
+      }),
+      this.prisma.propertyEnquiry.findMany({
+        where: {
+          agentId: userId,
+          status: { in: ['NEW', 'IN_PROGRESS'] },
+        },
+        orderBy: { createdAt: 'desc' },
+        take: 5,
+        include: {
+          property: {
+            select: {
+              id: true,
+              propertyCode: true,
+              title: true,
+              propertyType: true,
+              city: true,
+              state: true,
+              media: {
+                where: { isPrimary: true },
+                take: 1,
+                select: { url: true, thumbnailUrl: true },
+              },
+            },
+          },
+          customer: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              email: true,
+              phone: true,
+              customerProfile: {
+                select: { profileImage: true },
+              },
+            },
+          },
+        },
+      }),
+      this.prisma.property.findMany({
+        where: {
+          id: { in: propertyIds },
+          deletedAt: null,
+        },
+        orderBy: { createdAt: 'desc' },
+        take: 4,
+        select: {
+          id: true,
+          propertyCode: true,
+          title: true,
+          propertyType: true,
+          city: true,
+          state: true,
+          media: {
+            where: { isPrimary: true },
+            take: 1,
+            select: { url: true, thumbnailUrl: true },
+          },
+          listings: {
+            where: { status: 'PUBLISHED' },
+            take: 1,
+            select: { price: true, currency: true, listingType: true, status: true },
+          },
+          verification: {
+            select: { status: true, riskLevel: true, completedAt: true },
+          },
+        },
+      }),
+      this.prisma.propertyInspection.findMany({
+        where: {
+          agentId: userId,
+          customerRating: { not: null },
+        },
+        orderBy: { feedbackSubmittedAt: 'desc' },
+        take: 5,
+        select: {
+          id: true,
+          customerRating: true,
+          customerFeedback: true,
+          feedbackSubmittedAt: true,
+          customer: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              customerProfile: {
+                select: { profileImage: true },
+              },
+            },
+          },
+          property: {
+            select: {
+              id: true,
+              propertyCode: true,
+              title: true,
+            },
+          },
+        },
+      }),
+    ]);
+
+    // Calculate rating & review metrics
+    const totalReviews = await this.prisma.propertyInspection.count({
+      where: {
+        agentId: userId,
+        customerRating: { not: null },
+      },
+    });
+
+    const ratingAggregate = await this.prisma.propertyInspection.aggregate({
+      where: {
+        agentId: userId,
+        customerRating: { not: null },
+      },
+      _avg: {
+        customerRating: true,
+      },
+    });
+
+    const averageRating = ratingAggregate._avg.customerRating
+      ? Number(ratingAggregate._avg.customerRating.toFixed(1))
+      : 5.0;
+
+    const totalClosedVolume = successfulTransactions.reduce(
+      (sum, t) => sum + Number(t.amount),
+      0,
+    );
+
+    return {
+      agent: {
+        id: user.id,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        email: user.email,
+        phone: user.phone,
+        roles,
+        agentCode: agentProfile.agentCode,
+        licenseNumber: agentProfile.licenseNumber,
+        agencyName: agentProfile.agencyName,
+        specialties: agentProfile.specialties,
+        yearsOfExperience: agentProfile.yearsOfExperience,
+        officeAddress: agentProfile.officeAddress,
+        bio: agentProfile.bio,
+        profileImage: agentProfile.profileImage,
+        joinedAt: agentProfile.joinedAt,
+      },
+      stats: {
+        properties: {
+          total: totalPropertiesCount,
+          active: activePropertiesCount,
+        },
+        leads: {
+          total: totalAssignedLeads,
+          new: newLeadsCount,
+          inProgress: inProgressLeadsCount,
+          resolved: resolvedLeadsCount,
+        },
+        inspections: {
+          total: totalInspectionsCount,
+          today: todayInspectionsCount,
+          upcoming: upcomingInspectionsCount,
+          completed: completedInspectionsCount,
+          rescheduled: rescheduledInspectionsCount,
+        },
+        clients: {
+          totalAssigned: assignedClientsCount,
+        },
+        performance: {
+          averageRating,
+          totalReviews,
+          closedDealsCount: successfulTransactions.length,
+          totalClosedVolume,
+          currency: 'NGN',
+        },
+        unreadNotificationsCount,
+        activeConversationsCount,
+      },
+      todayVisits: todayVisits.map((v) => ({
+        id: v.id,
+        scheduledAt: v.scheduledAt,
+        status: v.status,
+        location: v.location,
+        notes: v.notes,
+        property: {
+          id: v.property.id,
+          propertyCode: v.property.propertyCode,
+          title: v.property.title,
+          propertyType: v.property.propertyType,
+          address: v.property.address,
+          city: v.property.city,
+          state: v.property.state,
+          primaryMedia: v.property.media[0] || null,
+        },
+        customer: {
+          id: v.customer.id,
+          name: `${v.customer.firstName} ${v.customer.lastName}`,
+          email: v.customer.email,
+          phone: v.customer.phone,
+          profileImage: v.customer.customerProfile?.profileImage || null,
+        },
+      })),
+      upcomingVisits: upcomingVisits.map((v) => ({
+        id: v.id,
+        scheduledAt: v.scheduledAt,
+        status: v.status,
+        location: v.location,
+        notes: v.notes,
+        property: {
+          id: v.property.id,
+          propertyCode: v.property.propertyCode,
+          title: v.property.title,
+          propertyType: v.property.propertyType,
+          address: v.property.address,
+          city: v.property.city,
+          state: v.property.state,
+          primaryMedia: v.property.media[0] || null,
+        },
+        customer: {
+          id: v.customer.id,
+          name: `${v.customer.firstName} ${v.customer.lastName}`,
+          email: v.customer.email,
+          phone: v.customer.phone,
+          profileImage: v.customer.customerProfile?.profileImage || null,
+        },
+      })),
+      urgentLeads: urgentLeads.map((l) => ({
+        id: l.id,
+        type: l.type,
+        message: l.message,
+        status: l.status,
+        createdAt: l.createdAt,
+        property: {
+          id: l.property.id,
+          propertyCode: l.property.propertyCode,
+          title: l.property.title,
+          propertyType: l.property.propertyType,
+          city: l.property.city,
+          state: l.property.state,
+          primaryMedia: l.property.media[0] || null,
+        },
+        customer: {
+          id: l.customer.id,
+          name: `${l.customer.firstName} ${l.customer.lastName}`,
+          email: l.customer.email,
+          phone: l.customer.phone,
+          profileImage: l.customer.customerProfile?.profileImage || null,
+        },
+      })),
+      myPropertiesPreview: myPropertiesPreview.map((p) => ({
+        id: p.id,
+        propertyCode: p.propertyCode,
+        title: p.title,
+        propertyType: p.propertyType,
+        status: p.listings[0]?.status || 'UNLISTED',
+        city: p.city,
+        state: p.state,
+        primaryMedia: p.media[0] || null,
+        listing: p.listings[0] || null,
+        verification: p.verification || null,
+      })),
+      recentClientFeedback: reviews.map((r) => ({
+        id: r.id,
+        rating: r.customerRating,
+        feedback: r.customerFeedback,
+        submittedAt: r.feedbackSubmittedAt,
+        customerName: `${r.customer.firstName} ${r.customer.lastName}`,
+        customerImage: r.customer.customerProfile?.profileImage || null,
+        propertyTitle: r.property.title,
+        propertyCode: r.property.propertyCode,
+      })),
+    };
+  }
+
   async getMyAssignedAgents(userId: string) {
     const relationships = await this.prisma.customerAgent.findMany({
       where: { customerId: userId, status: 'ACTIVE' },
