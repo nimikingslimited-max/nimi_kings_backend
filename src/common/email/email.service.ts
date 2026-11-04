@@ -27,11 +27,26 @@ export class EmailService implements OnModuleInit {
     const secureVal = this.configService.get<string>('SMTP_SECURE');
     const secure =
       secureVal !== undefined ? secureVal === 'true' || secureVal === '1' : port === 465;
-    const user = this.configService.get<string>('SMTP_USER');
-    const pass = this.configService.get<string>('SMTP_PASS');
-    this.fromAddress =
-      this.configService.get<string>('SMTP_FROM') ||
-      (user ? `"NIMI KINGS LTD" <${user}>` : '"NIMI KINGS LTD" <noreply@nimikingsltd.com>');
+    const user = this.configService.get<string>('SMTP_USER')?.trim();
+    const rawPass = this.configService.get<string>('SMTP_PASS');
+    // Normalize app password by removing any accidental spaces
+    const pass = rawPass ? rawPass.replace(/\s+/g, '').trim() : undefined;
+
+    if (user && !user.includes('@')) {
+      this.logger.error(
+        `❌ [EmailService] Invalid SMTP_USER: "${user}". SMTP_USER must be your full Gmail/Google email address (e.g. youraccount@gmail.com), NOT the App Name label you entered when generating the App Password.`,
+      );
+    }
+
+    // For Gmail SMTP, the From address must use the authenticated Gmail account or a verified alias
+    const configuredFrom = this.configService.get<string>('SMTP_FROM');
+    if (configuredFrom && !configuredFrom.includes('noreply@nimikingsltd.com')) {
+      this.fromAddress = configuredFrom;
+    } else if (user && user.includes('@')) {
+      this.fromAddress = `"NIMI KINGS LTD" <${user}>`;
+    } else {
+      this.fromAddress = '"NIMI KINGS LTD" <noreply@nimikingsltd.com>';
+    }
 
     if (host && user && pass) {
       this.transporter = nodemailer.createTransport({
@@ -43,7 +58,7 @@ export class EmailService implements OnModuleInit {
           rejectUnauthorized: false,
         },
       });
-      this.logger.log(`📧 SMTP Transporter initialized (host: ${host}, port: ${port}, secure: ${secure})`);
+      this.logger.log(`📧 SMTP Transporter initialized (host: ${host}, port: ${port}, secure: ${secure}, user: ${user})`);
     } else {
       this.logger.warn(
         '⚠️ SMTP credentials not fully configured in .env. EmailService running in Development Console mode.',
@@ -236,7 +251,7 @@ export class EmailService implements OnModuleInit {
     token: string,
     resetUrl?: string,
   ): Promise<boolean> {
-    const subject = 'Reset Your NIMI KINGS Password';
+    const subject = 'Reset Your Account Password';
     const fallbackUrl =
       resetUrl || `https://www.nimikingsltd.com/auth/reset-password?token=${token}`;
 
@@ -292,7 +307,7 @@ export class EmailService implements OnModuleInit {
   }
 
   async sendPasswordChangedAlert(to: string, name: string): Promise<boolean> {
-    const subject = 'Security Alert: Your NIMI KINGS Password Was Changed';
+    const subject = 'Security Alert: Your Account Password Was Changed';
     const html = `
       <!DOCTYPE html>
       <html>
