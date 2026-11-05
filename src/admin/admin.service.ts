@@ -17,6 +17,7 @@ import { UpdateListingStatusDto } from './dto/update-listing-status.dto.js';
 import { AdminAssignAgentDto } from './dto/admin-assign-agent.dto.js';
 import { AdminKycQueryDto } from './dto/admin-kyc-query.dto.js';
 import { ReviewKycDto, KycReviewDecision } from '../users/dto/review-kyc.dto.js';
+import { AdminAuditQueryDto } from './dto/admin-audit-query.dto.js';
 
 @Injectable()
 export class AdminService {
@@ -1529,6 +1530,195 @@ export class AdminService {
       kycStatus: updated.kycStatus,
       reviewedAt: updated.kycReviewedAt,
       rejectionReason: updated.kycRejectionReason,
+    };
+  }
+
+  /**
+   * System audit trail viewer with search, action, actor, entity, and date range filters.
+   */
+  async getAuditLogs(query: AdminAuditQueryDto) {
+    const page = query.page && query.page > 0 ? Number(query.page) : 1;
+    const limit = query.limit && query.limit > 0 ? Math.min(Number(query.limit), 100) : 20;
+    const skip = (page - 1) * limit;
+
+    const where: Prisma.AuditLogWhereInput = {};
+
+    if (query.search) {
+      const term = query.search.trim();
+      where.OR = [
+        { action: { contains: term, mode: 'insensitive' } },
+        { entityType: { contains: term, mode: 'insensitive' } },
+        { entityId: { contains: term, mode: 'insensitive' } },
+        { ipAddress: { contains: term, mode: 'insensitive' } },
+      ];
+    }
+
+    if (query.action) {
+      where.action = { contains: query.action, mode: 'insensitive' };
+    }
+
+    if (query.entityType) {
+      where.entityType = { equals: query.entityType, mode: 'insensitive' };
+    }
+
+    if (query.userId) {
+      where.userId = query.userId;
+    }
+
+    if (query.entityId) {
+      where.entityId = query.entityId;
+    }
+
+    if (query.startDate || query.endDate) {
+      where.createdAt = {
+        ...(query.startDate ? { gte: new Date(query.startDate) } : {}),
+        ...(query.endDate ? { lte: new Date(query.endDate) } : {}),
+      };
+    }
+
+    const sortOrder = query.sortOrder === 'asc' ? 'asc' : 'desc';
+
+    const [total, logs] = await Promise.all([
+      this.prisma.auditLog.count({ where }),
+      this.prisma.auditLog.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy: { createdAt: sortOrder },
+        include: {
+          user: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              email: true,
+              userRoles: {
+                include: { role: true },
+              },
+            },
+          },
+        },
+      }),
+    ]);
+
+    const items = logs.map((log) => ({
+      id: log.id,
+      action: log.action,
+      entityType: log.entityType,
+      entityId: log.entityId,
+      actor: log.user
+        ? {
+            id: log.user.id,
+            name: `${log.user.firstName} ${log.user.lastName}`,
+            email: log.user.email,
+            roles: log.user.userRoles.map((ur) => ur.role.name),
+          }
+        : { name: 'System / Automated' },
+      oldValues: log.oldValues,
+      newValues: log.newValues,
+      ipAddress: log.ipAddress,
+      userAgent: log.userAgent,
+      createdAt: log.createdAt,
+    }));
+
+    return {
+      data: items,
+      meta: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit) || 1,
+      },
+    };
+  }
+
+  /**
+   * System security & audit telemetry statistics.
+   */
+  async getAuditStats() {
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+
+    const [totalLogs, byEntityTypeRaw, topActionsRaw, securityEventsCount, topActorsRaw] =
+      await Promise.all([
+        this.prisma.auditLog.count(),
+        this.prisma.auditLog.groupBy({
+          by: ['entityType'],
+          _count: { id: true },
+        }),
+        this.prisma.auditLog.groupBy({
+          by: ['action'],
+          _count: { id: true },
+          orderBy: { _count: { id: 'desc' } },
+          take: 8,
+        }),
+        this.prisma.auditLog.count({
+          where: {
+            action: {
+              in: [
+                'ADMIN_USER_STATUS_SUSPENDED',
+                'ADMIN_USER_STATUS_DEACTIVATED',
+                'ADMIN_USER_ROLES_UPDATED',
+                'ADMIN_STAFF_USER_CREATED',
+                'ADMIN_KYC_REJECTED',
+                'USER_ACCOUNT_DEACTIVATED',
+              ],
+            },
+          },
+        }),
+        this.prisma.auditLog.groupBy({
+          by: ['userId'],
+          where: {
+            userId: { not: null },
+            createdAt: { gte: thirtyDaysAgo },
+          },
+          _count: { id: true },
+          orderBy: { _count: { id: 'desc' } },
+          take: 6,
+        }),
+      ]);
+
+    const byEntityType: Record<string, number> = {};
+    for (const e of byEntityTypeRaw) {
+      byEntityType[e.entityType] = e._count.id;
+    }
+
+    const topActions = topActionsRaw.map((a) => ({
+      action: a.action,
+      count: a._count.id,
+    }));
+
+    const actorUserIds = topActorsRaw
+      .map((a) => a.userId)
+      .filter((id): id is string => id !== null);
+
+    const actorUsers = await this.prisma.user.findMany({
+      where: { id: { in: actorUserIds } },
+      select: {
+        id: true,
+        firstName: true,
+        lastName: true,
+        email: true,
+      },
+    });
+
+    const actorUserMap = new Map(actorUsers.map((u) => [u.id, u]));
+
+    const activeActors = topActorsRaw.map((a) => {
+      const u = a.userId ? actorUserMap.get(a.userId) : null;
+      return {
+        userId: a.userId,
+        name: u ? `${u.firstName} ${u.lastName}` : 'Automated Task',
+        email: u?.email,
+        actionsCount30Days: a._count.id,
+      };
+    });
+
+    return {
+      totalLogs,
+      securityEventsCount,
+      byEntityType,
+      topActions,
+      activeActors,
     };
   }
 }

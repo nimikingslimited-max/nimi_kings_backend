@@ -27,6 +27,7 @@ import { UpdateListingStatusDto } from './dto/update-listing-status.dto.js';
 import { AdminAssignAgentDto } from './dto/admin-assign-agent.dto.js';
 import { AdminKycQueryDto } from './dto/admin-kyc-query.dto.js';
 import { ReviewKycDto } from '../users/dto/review-kyc.dto.js';
+import { AdminAuditQueryDto } from './dto/admin-audit-query.dto.js';
 import { Roles } from '../common/decorators/roles.decorator.js';
 import { CurrentUser } from '../common/decorators/current-user.decorator.js';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard.js';
@@ -315,5 +316,37 @@ export class AdminController {
     @CurrentUser('id') adminId: string,
   ) {
     return this.adminService.reviewKycSubmission(customerId, dto, adminId);
+  }
+
+  // ==========================================
+  // SYSTEM AUDIT TRAIL & SECURITY MONITOR
+  // ==========================================
+
+  @Get('audit-logs')
+  @Roles(RoleType.ADMIN, RoleType.SUPER_ADMIN)
+  @ApiOperation({
+    summary:
+      'List and filter system audit trail records (search, filter by action, entityType, actor, entityId, date range)',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Paginated audit log entries with actor identities and JSON diffs',
+  })
+  getAuditLogs(@Query() query: AdminAuditQueryDto) {
+    return this.adminService.getAuditLogs(query);
+  }
+
+  @Get('audit-logs/stats')
+  @Roles(RoleType.ADMIN, RoleType.SUPER_ADMIN)
+  @ApiOperation({
+    summary:
+      'Get high-level audit & security telemetry statistics (entity breakdown, top actions, critical security events)',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Security & compliance telemetry summary',
+  })
+  getAuditStats() {
+    return this.adminService.getAuditStats();
   }
 }
