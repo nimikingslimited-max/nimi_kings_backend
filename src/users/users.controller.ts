@@ -20,6 +20,7 @@ import {
 } from '@nestjs/swagger';
 import { RoleType } from '@prisma/client';
 import { UsersService } from './users.service.js';
+import { AdminService } from '../admin/admin.service.js';
 import { UpdateProfileDto } from './dto/update-profile.dto.js';
 import { FavoriteQueryDto } from './dto/favorite-query.dto.js';
 import { SubmitKycDto } from './dto/submit-kyc.dto.js';
@@ -40,7 +41,10 @@ import { JwtAuthGuard } from '../common/guards/jwt-auth.guard.js';
 @UseGuards(JwtAuthGuard)
 @Controller('users')
 export class UsersController {
-  constructor(private readonly usersService: UsersService) {}
+  constructor(
+    private readonly usersService: UsersService,
+    private readonly adminService: AdminService,
+  ) {}
 
   @Get('profile')
   @ApiOperation({
@@ -107,6 +111,20 @@ export class UsersController {
   })
   getAgentDashboard(@CurrentUser('id') userId: string) {
     return this.usersService.getAgentDashboard(userId);
+  }
+
+  @Get('admin/dashboard')
+  @Roles(RoleType.ADMIN, RoleType.SUPER_ADMIN)
+  @ApiOperation({
+    summary:
+      'Get platform-wide operational KPIs, domain statistics, urgent action queues, and live activity feeds',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Comprehensive administrative dashboard analytics payload',
+  })
+  getAdminDashboard() {
+    return this.adminService.getDashboardOverview();
   }
 
   @Get('agent/properties')

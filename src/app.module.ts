@@ -15,6 +15,7 @@ import { PropertySearchModule } from './property-search/property-search.module.j
 import { NotificationsModule } from './notifications/notifications.module.js';
 import { MessagingModule } from './messaging/messaging.module.js';
 import { AuditModule } from './common/audit/audit.module.js';
+import { AdminModule } from './admin/admin.module.js';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard.js';
 import { RolesGuard } from './common/guards/roles.guard.js';
 
@@ -28,6 +29,7 @@ import { RolesGuard } from './common/guards/roles.guard.js';
     EmailModule,
     AuthModule,
     UsersModule,
+    AdminModule,
     PropertiesModule,
     PropertyVerificationModule,
     PropertySearchModule,
