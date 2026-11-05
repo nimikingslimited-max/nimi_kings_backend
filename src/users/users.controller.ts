@@ -26,6 +26,7 @@ import { SubmitKycDto } from './dto/submit-kyc.dto.js';
 import { ReviewKycDto } from './dto/review-kyc.dto.js';
 import { CreateSavedSearchDto } from './dto/create-saved-search.dto.js';
 import { DeactivateAccountDto } from './dto/deactivate-account.dto.js';
+import { AgentPropertyQueryDto } from './dto/agent-property-query.dto.js';
 import { CurrentUser } from '../common/decorators/current-user.decorator.js';
 import { Roles } from '../common/decorators/roles.decorator.js';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard.js';
@@ -102,6 +103,50 @@ export class UsersController {
   })
   getAgentDashboard(@CurrentUser('id') userId: string) {
     return this.usersService.getAgentDashboard(userId);
+  }
+
+  @Get('agent/properties')
+  @Roles(RoleType.AGENT, RoleType.ADMIN, RoleType.SUPER_ADMIN)
+  @ApiOperation({
+    summary:
+      'Get paginated portfolio of properties assigned to or created by the agent with lead and inspection metrics',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Paginated list of agent properties with metrics',
+  })
+  @ApiResponse({
+    status: 403,
+    description: 'Forbidden - Agent or Admin role required',
+  })
+  getAgentProperties(
+    @CurrentUser('id') userId: string,
+    @Query() query: AgentPropertyQueryDto,
+  ) {
+    return this.usersService.getAgentProperties(userId, query);
+  }
+
+  @Get('agent/properties/:propertyId/stats')
+  @Roles(RoleType.AGENT, RoleType.ADMIN, RoleType.SUPER_ADMIN)
+  @ApiOperation({
+    summary:
+      'Get deep property performance analytics for an agent (leads, scheduled site visits, reviews, wishlist saves)',
+  })
+  @ApiParam({ name: 'propertyId', description: 'Property UUID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Detailed property agent performance and lead analytics',
+  })
+  @ApiResponse({
+    status: 403,
+    description: 'Forbidden - You do not have permission to view metrics for this property',
+  })
+  @ApiResponse({ status: 404, description: 'Property not found' })
+  getAgentPropertyDetails(
+    @CurrentUser('id') userId: string,
+    @Param('propertyId') propertyId: string,
+  ) {
+    return this.usersService.getAgentPropertyDetails(userId, propertyId);
   }
 
   @Get('my-agent')
