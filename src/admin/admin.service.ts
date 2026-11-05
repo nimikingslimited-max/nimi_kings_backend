@@ -15,6 +15,8 @@ import { CreateStaffUserDto } from './dto/create-staff-user.dto.js';
 import { AdminPropertyQueryDto } from './dto/admin-property-query.dto.js';
 import { UpdateListingStatusDto } from './dto/update-listing-status.dto.js';
 import { AdminAssignAgentDto } from './dto/admin-assign-agent.dto.js';
+import { AdminKycQueryDto } from './dto/admin-kyc-query.dto.js';
+import { ReviewKycDto, KycReviewDecision } from '../users/dto/review-kyc.dto.js';
 
 @Injectable()
 export class AdminService {
@@ -1296,6 +1298,237 @@ export class AdminService {
       message: 'Agent unassigned from property successfully',
       propertyId: property.id,
       agentId,
+    };
+  }
+
+  /**
+   * Centralized KYC compliance queue with document filtering, search, and status.
+   */
+  async getKycQueue(query: AdminKycQueryDto) {
+    const page = query.page && query.page > 0 ? Number(query.page) : 1;
+    const limit = query.limit && query.limit > 0 ? Math.min(Number(query.limit), 100) : 10;
+    const skip = (page - 1) * limit;
+
+    const where: Prisma.CustomerProfileWhereInput = {};
+
+    if (query.status) {
+      where.kycStatus = query.status;
+    }
+
+    if (query.idType) {
+      where.idType = query.idType;
+    }
+
+    if (query.search) {
+      const term = query.search.trim();
+      where.OR = [
+        { idNumber: { contains: term, mode: 'insensitive' } },
+        { user: { firstName: { contains: term, mode: 'insensitive' } } },
+        { user: { lastName: { contains: term, mode: 'insensitive' } } },
+        { user: { email: { contains: term, mode: 'insensitive' } } },
+        { user: { phone: { contains: term, mode: 'insensitive' } } },
+      ];
+    }
+
+    const validSortFields = ['kycSubmittedAt', 'createdAt', 'kycReviewedAt'];
+    const sortBy = validSortFields.includes(query.sortBy || '') ? query.sortBy : 'kycSubmittedAt';
+    const sortOrder = query.sortOrder === 'asc' ? 'asc' : 'desc';
+
+    const [total, profiles] = await Promise.all([
+      this.prisma.customerProfile.count({ where }),
+      this.prisma.customerProfile.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy: { [sortBy!]: sortOrder },
+        include: {
+          user: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              email: true,
+              phone: true,
+              status: true,
+              createdAt: true,
+            },
+          },
+        },
+      }),
+    ]);
+
+    const items = profiles.map((p) => ({
+      customerId: p.userId,
+      fullName: `${p.user.firstName} ${p.user.lastName}`,
+      email: p.user.email,
+      phone: p.user.phone,
+      accountStatus: p.user.status,
+      city: p.city,
+      state: p.state,
+      country: p.country,
+      idType: p.idType,
+      idNumber: p.idNumber,
+      idDocumentUrl: p.idDocumentUrl,
+      proofOfAddressUrl: p.proofOfAddressUrl,
+      kycStatus: p.kycStatus,
+      kycSubmittedAt: p.kycSubmittedAt,
+      kycReviewedAt: p.kycReviewedAt,
+      kycRejectionReason: p.kycRejectionReason,
+      registeredAt: p.user.createdAt,
+    }));
+
+    return {
+      data: items,
+      meta: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit) || 1,
+      },
+    };
+  }
+
+  /**
+   * Get complete KYC compliance dossier for a specific customer.
+   */
+  async getKycDossier(customerId: string) {
+    const profile = await this.prisma.customerProfile.findUnique({
+      where: { userId: customerId },
+      include: {
+        user: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+            phone: true,
+            status: true,
+            createdAt: true,
+          },
+        },
+      },
+    });
+
+    if (!profile) {
+      throw new NotFoundException(`Customer profile for user ID '${customerId}' not found`);
+    }
+
+    const recentAuditLogs = await this.prisma.auditLog.findMany({
+      where: {
+        entityId: customerId,
+        entityType: 'CustomerProfile',
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 5,
+    });
+
+    return {
+      customer: {
+        id: profile.user.id,
+        firstName: profile.user.firstName,
+        lastName: profile.user.lastName,
+        email: profile.user.email,
+        phone: profile.user.phone,
+        status: profile.user.status,
+        registeredAt: profile.user.createdAt,
+      },
+      kyc: {
+        status: profile.kycStatus,
+        idType: profile.idType,
+        idNumber: profile.idNumber,
+        idDocumentUrl: profile.idDocumentUrl,
+        proofOfAddressUrl: profile.proofOfAddressUrl,
+        profileImage: profile.profileImage,
+        city: profile.city,
+        state: profile.state,
+        country: profile.country,
+        submittedAt: profile.kycSubmittedAt,
+        reviewedAt: profile.kycReviewedAt,
+        rejectionReason: profile.kycRejectionReason,
+      },
+      complianceHistory: recentAuditLogs,
+    };
+  }
+
+  /**
+   * Compliance: Review customer KYC identity submission (Approve or Reject with reason).
+   */
+  async reviewKycSubmission(customerId: string, dto: ReviewKycDto, adminId: string) {
+    const profile = await this.prisma.customerProfile.findUnique({
+      where: { userId: customerId },
+      include: {
+        user: {
+          select: { id: true, firstName: true, lastName: true, email: true },
+        },
+      },
+    });
+
+    if (!profile) {
+      throw new NotFoundException(`Customer profile for user ID '${customerId}' not found`);
+    }
+
+    if (dto.status === KycReviewDecision.REJECTED && !dto.rejectionReason) {
+      throw new BadRequestException('A rejection reason must be provided when rejecting a KYC submission');
+    }
+
+    const oldStatus = profile.kycStatus;
+
+    const updated = await this.prisma.customerProfile.update({
+      where: { userId: customerId },
+      data: {
+        kycStatus: dto.status as any,
+        kycReviewedAt: new Date(),
+        kycRejectionReason: dto.status === KycReviewDecision.REJECTED ? dto.rejectionReason : null,
+      },
+      include: {
+        user: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+          },
+        },
+      },
+    });
+
+    // Notify customer
+    await this.prisma.notification
+      .create({
+        data: {
+          userId: customerId,
+          type: 'DOCUMENT_VERIFIED',
+          title:
+            dto.status === KycReviewDecision.VERIFIED
+              ? 'Identity Verification Approved'
+              : 'Identity Verification Update',
+          message:
+            dto.status === KycReviewDecision.VERIFIED
+              ? 'Congratulations! Your identity documents have been verified by compliance. You now possess full verified buyer privileges on NIMI KINGS LTD.'
+              : `Your identity documents could not be approved. Reason: "${dto.rejectionReason}". Please review and re-submit your documents.`,
+          data: { kycStatus: dto.status },
+        },
+      })
+      .catch(() => {});
+
+    await this.auditService.log({
+      userId: adminId,
+      action: `ADMIN_KYC_${dto.status}`,
+      entityType: 'CustomerProfile',
+      entityId: customerId,
+      oldValues: { kycStatus: oldStatus },
+      newValues: {
+        kycStatus: dto.status,
+        rejectionReason: dto.rejectionReason,
+      },
+    });
+
+    return {
+      message: `Customer KYC submission has been marked as ${dto.status} successfully`,
+      customerId,
+      kycStatus: updated.kycStatus,
+      reviewedAt: updated.kycReviewedAt,
+      rejectionReason: updated.kycRejectionReason,
     };
   }
 }

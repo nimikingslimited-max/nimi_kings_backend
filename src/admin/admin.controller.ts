@@ -25,6 +25,8 @@ import { CreateStaffUserDto } from './dto/create-staff-user.dto.js';
 import { AdminPropertyQueryDto } from './dto/admin-property-query.dto.js';
 import { UpdateListingStatusDto } from './dto/update-listing-status.dto.js';
 import { AdminAssignAgentDto } from './dto/admin-assign-agent.dto.js';
+import { AdminKycQueryDto } from './dto/admin-kyc-query.dto.js';
+import { ReviewKycDto } from '../users/dto/review-kyc.dto.js';
 import { Roles } from '../common/decorators/roles.decorator.js';
 import { CurrentUser } from '../common/decorators/current-user.decorator.js';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard.js';
@@ -253,5 +255,65 @@ export class AdminController {
     @CurrentUser('id') adminId: string,
   ) {
     return this.adminService.removeAgentFromProperty(id, agentId, adminId);
+  }
+
+  // ==========================================
+  // CENTRALIZED COMPLIANCE & KYC QUEUE
+  // ==========================================
+
+  @Get('kyc')
+  @Roles(RoleType.ADMIN, RoleType.SUPER_ADMIN, RoleType.VERIFICATION_OFFICER)
+  @ApiOperation({
+    summary:
+      'List and filter customer KYC compliance verification submissions (filter by status, search, ID type)',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Paginated customer KYC submissions queue',
+  })
+  getKycQueue(@Query() query: AdminKycQueryDto) {
+    return this.adminService.getKycQueue(query);
+  }
+
+  @Get('kyc/:customerId')
+  @Roles(RoleType.ADMIN, RoleType.SUPER_ADMIN, RoleType.VERIFICATION_OFFICER)
+  @ApiOperation({
+    summary:
+      'Get full KYC compliance dossier for a customer (uploaded ID docs, proof of address, compliance audit history)',
+  })
+  @ApiParam({ name: 'customerId', description: 'Customer user UUID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Detailed customer KYC dossier',
+  })
+  @ApiResponse({
+    status: 404,
+    description: 'Customer profile not found',
+  })
+  getKycDossier(@Param('customerId') customerId: string) {
+    return this.adminService.getKycDossier(customerId);
+  }
+
+  @Patch('kyc/:customerId/review')
+  @Roles(RoleType.ADMIN, RoleType.SUPER_ADMIN, RoleType.VERIFICATION_OFFICER)
+  @ApiOperation({
+    summary:
+      'Compliance: Review and approve/reject customer KYC identity submission (dispatches customer notification)',
+  })
+  @ApiParam({ name: 'customerId', description: 'Customer user UUID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Customer KYC submission reviewed successfully',
+  })
+  @ApiResponse({
+    status: 400,
+    description: 'Rejection reason required when rejecting submission',
+  })
+  reviewKycSubmission(
+    @Param('customerId') customerId: string,
+    @Body() dto: ReviewKycDto,
+    @CurrentUser('id') adminId: string,
+  ) {
+    return this.adminService.reviewKycSubmission(customerId, dto, adminId);
   }
 }
