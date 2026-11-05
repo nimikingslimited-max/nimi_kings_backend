@@ -15,6 +15,8 @@ import { ReviewKycDto, KycReviewDecision } from './dto/review-kyc.dto.js';
 import { CreateSavedSearchDto } from './dto/create-saved-search.dto.js';
 import { DeactivateAccountDto } from './dto/deactivate-account.dto.js';
 import { AgentPropertyQueryDto } from './dto/agent-property-query.dto.js';
+import { AgentLeadQueryDto } from './dto/agent-lead-query.dto.js';
+import { UpdateAgentLeadDto } from './dto/update-agent-lead.dto.js';
 
 @Injectable()
 export class UsersService {
@@ -1314,6 +1316,501 @@ export class UsersService {
         customerName: `${r.customer.firstName} ${r.customer.lastName}`,
         customerImage: r.customer.customerProfile?.profileImage || null,
       })),
+    };
+  }
+
+  // ==========================================
+  // AGENT LEADS & CLIENT CRM
+  // ==========================================
+
+  async getAgentLeads(userId: string, query: AgentLeadQueryDto) {
+    const page = query.page && query.page > 0 ? Number(query.page) : 1;
+    const limit = query.limit && query.limit > 0 ? Number(query.limit) : 10;
+    const skip = (page - 1) * limit;
+
+    const where: Prisma.PropertyEnquiryWhereInput = {
+      agentId: userId,
+    };
+
+    if (query.status) {
+      where.status = query.status;
+    }
+
+    if (query.type) {
+      where.type = query.type;
+    }
+
+    if (query.propertyId) {
+      where.propertyId = query.propertyId;
+    }
+
+    if (query.search) {
+      const term = query.search.trim();
+      where.OR = [
+        { customer: { firstName: { contains: term, mode: 'insensitive' } } },
+        { customer: { lastName: { contains: term, mode: 'insensitive' } } },
+        { customer: { email: { contains: term, mode: 'insensitive' } } },
+        { customer: { phone: { contains: term, mode: 'insensitive' } } },
+        { property: { title: { contains: term, mode: 'insensitive' } } },
+        { property: { propertyCode: { contains: term, mode: 'insensitive' } } },
+      ];
+    }
+
+    const [
+      total,
+      newCount,
+      inProgressCount,
+      resolvedCount,
+      closedCount,
+      leads,
+    ] = await Promise.all([
+      this.prisma.propertyEnquiry.count({ where }),
+      this.prisma.propertyEnquiry.count({
+        where: { agentId: userId, status: 'NEW' },
+      }),
+      this.prisma.propertyEnquiry.count({
+        where: { agentId: userId, status: 'IN_PROGRESS' },
+      }),
+      this.prisma.propertyEnquiry.count({
+        where: { agentId: userId, status: 'RESOLVED' },
+      }),
+      this.prisma.propertyEnquiry.count({
+        where: { agentId: userId, status: 'CLOSED' },
+      }),
+      this.prisma.propertyEnquiry.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy: {
+          [query.sortBy || 'createdAt']: query.sortOrder || 'desc',
+        },
+        include: {
+          customer: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              email: true,
+              phone: true,
+              customerProfile: {
+                select: {
+                  profileImage: true,
+                  city: true,
+                  state: true,
+                  kycStatus: true,
+                },
+              },
+            },
+          },
+          property: {
+            select: {
+              id: true,
+              propertyCode: true,
+              title: true,
+              propertyType: true,
+              city: true,
+              state: true,
+              media: {
+                where: { isPrimary: true },
+                take: 1,
+                select: { url: true, thumbnailUrl: true },
+              },
+              listings: {
+                where: { status: 'PUBLISHED' },
+                take: 1,
+                select: { price: true, currency: true, listingType: true },
+              },
+            },
+          },
+        },
+      }),
+    ]);
+
+    const data = leads.map((l) => ({
+      id: l.id,
+      type: l.type,
+      message: l.message,
+      agentNotes: l.agentNotes,
+      status: l.status,
+      createdAt: l.createdAt,
+      updatedAt: l.updatedAt,
+      customer: {
+        id: l.customer.id,
+        name: `${l.customer.firstName} ${l.customer.lastName}`,
+        email: l.customer.email,
+        phone: l.customer.phone,
+        profileImage: l.customer.customerProfile?.profileImage || null,
+        city: l.customer.customerProfile?.city || null,
+        state: l.customer.customerProfile?.state || null,
+        kycStatus: l.customer.customerProfile?.kycStatus || 'NOT_SUBMITTED',
+      },
+      property: {
+        id: l.property.id,
+        propertyCode: l.property.propertyCode,
+        title: l.property.title,
+        propertyType: l.property.propertyType,
+        city: l.property.city,
+        state: l.property.state,
+        primaryMedia: l.property.media[0] || null,
+        listing: l.property.listings[0] || null,
+      },
+    }));
+
+    return {
+      summary: {
+        total,
+        new: newCount,
+        inProgress: inProgressCount,
+        resolved: resolvedCount,
+        closed: closedCount,
+      },
+      data,
+      meta: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit),
+        hasNextPage: page * limit < total,
+        hasPreviousPage: page > 1,
+      },
+    };
+  }
+
+  async getAgentLeadById(userId: string, leadId: string) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      include: { userRoles: { include: { role: true } } },
+    });
+
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+
+    const roles = user.userRoles.map((ur) => ur.role.name);
+    const isAdmin =
+      roles.includes('ADMIN') || roles.includes('SUPER_ADMIN');
+
+    const lead = await this.prisma.propertyEnquiry.findUnique({
+      where: { id: leadId },
+      include: {
+        customer: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+            phone: true,
+            createdAt: true,
+            customerProfile: true,
+          },
+        },
+        property: {
+          include: {
+            media: {
+              where: { isPrimary: true },
+              take: 1,
+            },
+            listings: {
+              where: { status: 'PUBLISHED' },
+              take: 1,
+            },
+          },
+        },
+      },
+    });
+
+    if (!lead) {
+      throw new NotFoundException('Lead enquiry not found');
+    }
+
+    if (!isAdmin && lead.agentId !== userId) {
+      throw new ForbiddenException(
+        'You do not have permission to view this customer lead',
+      );
+    }
+
+    const [pastCustomerEnquiries, customerInspections] = await Promise.all([
+      this.prisma.propertyEnquiry.findMany({
+        where: {
+          customerId: lead.customerId,
+          id: { not: leadId },
+        },
+        orderBy: { createdAt: 'desc' },
+        take: 5,
+        select: {
+          id: true,
+          type: true,
+          message: true,
+          status: true,
+          createdAt: true,
+          property: {
+            select: { id: true, title: true, propertyCode: true },
+          },
+        },
+      }),
+      this.prisma.propertyInspection.findMany({
+        where: { customerId: lead.customerId },
+        orderBy: { scheduledAt: 'desc' },
+        take: 5,
+        select: {
+          id: true,
+          scheduledAt: true,
+          status: true,
+          location: true,
+          notes: true,
+          property: {
+            select: { id: true, title: true, propertyCode: true },
+          },
+        },
+      }),
+    ]);
+
+    return {
+      lead: {
+        id: lead.id,
+        type: lead.type,
+        message: lead.message,
+        agentNotes: lead.agentNotes,
+        status: lead.status,
+        createdAt: lead.createdAt,
+        updatedAt: lead.updatedAt,
+      },
+      customer: {
+        id: lead.customer.id,
+        name: `${lead.customer.firstName} ${lead.customer.lastName}`,
+        email: lead.customer.email,
+        phone: lead.customer.phone,
+        memberSince: lead.customer.createdAt,
+        profile: lead.customer.customerProfile,
+      },
+      property: {
+        id: lead.property.id,
+        propertyCode: lead.property.propertyCode,
+        title: lead.property.title,
+        propertyType: lead.property.propertyType,
+        address: lead.property.address,
+        city: lead.property.city,
+        state: lead.property.state,
+        primaryMedia: lead.property.media[0] || null,
+        listing: lead.property.listings[0] || null,
+      },
+      customerHistory: {
+        otherEnquiries: pastCustomerEnquiries,
+        inspections: customerInspections,
+      },
+    };
+  }
+
+  async updateAgentLead(
+    userId: string,
+    leadId: string,
+    dto: UpdateAgentLeadDto,
+  ) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      include: { userRoles: { include: { role: true } } },
+    });
+
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+
+    const roles = user.userRoles.map((ur) => ur.role.name);
+    const isAdmin =
+      roles.includes('ADMIN') || roles.includes('SUPER_ADMIN');
+
+    const lead = await this.prisma.propertyEnquiry.findUnique({
+      where: { id: leadId },
+    });
+
+    if (!lead) {
+      throw new NotFoundException('Lead enquiry not found');
+    }
+
+    if (!isAdmin && lead.agentId !== userId) {
+      throw new ForbiddenException(
+        'You do not have permission to update this customer lead',
+      );
+    }
+
+    const updated = await this.prisma.propertyEnquiry.update({
+      where: { id: leadId },
+      data: {
+        ...(dto.status !== undefined ? { status: dto.status } : {}),
+        ...(dto.agentNotes !== undefined ? { agentNotes: dto.agentNotes } : {}),
+      },
+      include: {
+        customer: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+            phone: true,
+          },
+        },
+        property: {
+          select: {
+            id: true,
+            title: true,
+            propertyCode: true,
+          },
+        },
+      },
+    });
+
+    await this.auditService.log({
+      userId,
+      action: 'UPDATE_AGENT_LEAD',
+      entityType: 'PropertyEnquiry',
+      entityId: leadId,
+      newValues: {
+        previousStatus: lead.status,
+        newStatus: dto.status,
+        hasNotesUpdate: dto.agentNotes !== undefined,
+      },
+    });
+
+    return {
+      message: 'Lead updated successfully',
+      lead: updated,
+    };
+  }
+
+  async getAgentClients(
+    userId: string,
+    page = 1,
+    limit = 10,
+    search?: string,
+  ) {
+    const pageNum = page > 0 ? Number(page) : 1;
+    const limitNum = limit > 0 ? Number(limit) : 10;
+    const skip = (pageNum - 1) * limitNum;
+
+    // Retrieve all customer IDs interacting with this agent
+    const [assignedClients, leadClients, inspectionClients] =
+      await Promise.all([
+        this.prisma.customerAgent.findMany({
+          where: { agentId: userId, status: 'ACTIVE' },
+          select: { customerId: true },
+        }),
+        this.prisma.propertyEnquiry.findMany({
+          where: { agentId: userId },
+          select: { customerId: true },
+        }),
+        this.prisma.propertyInspection.findMany({
+          where: { agentId: userId },
+          select: { customerId: true },
+        }),
+      ]);
+
+    const allCustomerIds = Array.from(
+      new Set([
+        ...assignedClients.map((c) => c.customerId),
+        ...leadClients.map((c) => c.customerId),
+        ...inspectionClients.map((c) => c.customerId),
+      ]),
+    );
+
+    const where: Prisma.UserWhereInput = {
+      id: { in: allCustomerIds },
+      deletedAt: null,
+    };
+
+    if (search) {
+      const term = search.trim();
+      where.OR = [
+        { firstName: { contains: term, mode: 'insensitive' } },
+        { lastName: { contains: term, mode: 'insensitive' } },
+        { email: { contains: term, mode: 'insensitive' } },
+        { phone: { contains: term, mode: 'insensitive' } },
+      ];
+    }
+
+    const [total, customers] = await Promise.all([
+      this.prisma.user.count({ where }),
+      this.prisma.user.findMany({
+        where,
+        skip,
+        take: limitNum,
+        orderBy: { createdAt: 'desc' },
+        select: {
+          id: true,
+          firstName: true,
+          lastName: true,
+          email: true,
+          phone: true,
+          createdAt: true,
+          customerProfile: {
+            select: {
+              profileImage: true,
+              city: true,
+              state: true,
+              occupation: true,
+              kycStatus: true,
+            },
+          },
+          _count: {
+            select: {
+              enquiriesSent: true,
+              inspectionsAsCustomer: true,
+              savedProperties: true,
+            },
+          },
+        },
+      }),
+    ]);
+
+    // For each customer, get their latest enquiry with this agent
+    const customerIds = customers.map((c) => c.id);
+    const latestEnquiries = await this.prisma.propertyEnquiry.findMany({
+      where: {
+        customerId: { in: customerIds },
+        agentId: userId,
+      },
+      orderBy: { createdAt: 'desc' },
+      distinct: ['customerId'],
+      select: {
+        customerId: true,
+        type: true,
+        status: true,
+        createdAt: true,
+        property: {
+          select: { id: true, title: true, propertyCode: true },
+        },
+      },
+    });
+
+    const latestEnquiryMap = new Map();
+    for (const e of latestEnquiries) {
+      latestEnquiryMap.set(e.customerId, e);
+    }
+
+    const data = customers.map((c) => ({
+      id: c.id,
+      name: `${c.firstName} ${c.lastName}`,
+      email: c.email,
+      phone: c.phone,
+      joinedAt: c.createdAt,
+      profile: c.customerProfile,
+      metrics: {
+        totalEnquiries: c._count.enquiriesSent,
+        totalInspections: c._count.inspectionsAsCustomer,
+        wishlistSaves: c._count.savedProperties,
+      },
+      latestInteraction: latestEnquiryMap.get(c.id) || null,
+    }));
+
+    return {
+      data,
+      meta: {
+        total,
+        page: pageNum,
+        limit: limitNum,
+        totalPages: Math.ceil(total / limitNum),
+        hasNextPage: pageNum * limitNum < total,
+        hasPreviousPage: pageNum > 1,
+      },
     };
   }
 

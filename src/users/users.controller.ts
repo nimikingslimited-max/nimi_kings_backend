@@ -27,6 +27,8 @@ import { ReviewKycDto } from './dto/review-kyc.dto.js';
 import { CreateSavedSearchDto } from './dto/create-saved-search.dto.js';
 import { DeactivateAccountDto } from './dto/deactivate-account.dto.js';
 import { AgentPropertyQueryDto } from './dto/agent-property-query.dto.js';
+import { AgentLeadQueryDto } from './dto/agent-lead-query.dto.js';
+import { UpdateAgentLeadDto } from './dto/update-agent-lead.dto.js';
 import { CurrentUser } from '../common/decorators/current-user.decorator.js';
 import { Roles } from '../common/decorators/roles.decorator.js';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard.js';
@@ -147,6 +149,89 @@ export class UsersController {
     @Param('propertyId') propertyId: string,
   ) {
     return this.usersService.getAgentPropertyDetails(userId, propertyId);
+  }
+
+  @Get('agent/leads')
+  @Roles(RoleType.AGENT, RoleType.ADMIN, RoleType.SUPER_ADMIN)
+  @ApiOperation({
+    summary:
+      'Get paginated customer leads and enquiries assigned to the agent with pipeline status summary',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Paginated list of customer leads with status counters',
+  })
+  getAgentLeads(
+    @CurrentUser('id') userId: string,
+    @Query() query: AgentLeadQueryDto,
+  ) {
+    return this.usersService.getAgentLeads(userId, query);
+  }
+
+  @Get('agent/leads/:leadId')
+  @Roles(RoleType.AGENT, RoleType.ADMIN, RoleType.SUPER_ADMIN)
+  @ApiOperation({
+    summary:
+      'Get single customer lead details with full customer history and property context',
+  })
+  @ApiParam({ name: 'leadId', description: 'Enquiry lead UUID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Lead details with customer interaction history',
+  })
+  @ApiResponse({
+    status: 403,
+    description: 'Forbidden if lead is not assigned to this agent',
+  })
+  @ApiResponse({ status: 404, description: 'Lead not found' })
+  getAgentLeadById(
+    @CurrentUser('id') userId: string,
+    @Param('leadId') leadId: string,
+  ) {
+    return this.usersService.getAgentLeadById(userId, leadId);
+  }
+
+  @Patch('agent/leads/:leadId')
+  @Roles(RoleType.AGENT, RoleType.ADMIN, RoleType.SUPER_ADMIN)
+  @ApiOperation({
+    summary:
+      'Update customer lead pipeline status and record internal agent follow-up notes',
+  })
+  @ApiParam({ name: 'leadId', description: 'Enquiry lead UUID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Lead updated successfully',
+  })
+  @ApiResponse({
+    status: 403,
+    description: 'Forbidden if lead is not assigned to this agent',
+  })
+  @ApiResponse({ status: 404, description: 'Lead not found' })
+  updateAgentLead(
+    @CurrentUser('id') userId: string,
+    @Param('leadId') leadId: string,
+    @Body() dto: UpdateAgentLeadDto,
+  ) {
+    return this.usersService.updateAgentLead(userId, leadId, dto);
+  }
+
+  @Get('agent/clients')
+  @Roles(RoleType.AGENT, RoleType.ADMIN, RoleType.SUPER_ADMIN)
+  @ApiOperation({
+    summary:
+      'Get paginated list of all customers / clients interacting with this agent (CRM cards)',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Paginated customer CRM cards with engagement metrics',
+  })
+  getAgentClients(
+    @CurrentUser('id') userId: string,
+    @Query('page') page?: number,
+    @Query('limit') limit?: number,
+    @Query('search') search?: string,
+  ) {
+    return this.usersService.getAgentClients(userId, page, limit, search);
   }
 
   @Get('my-agent')
