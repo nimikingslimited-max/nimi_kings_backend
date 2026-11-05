@@ -29,6 +29,8 @@ import { DeactivateAccountDto } from './dto/deactivate-account.dto.js';
 import { AgentPropertyQueryDto } from './dto/agent-property-query.dto.js';
 import { AgentLeadQueryDto } from './dto/agent-lead-query.dto.js';
 import { UpdateAgentLeadDto } from './dto/update-agent-lead.dto.js';
+import { UpdateAgentProfileDto } from './dto/update-agent-profile.dto.js';
+import { Public } from '../common/decorators/public.decorator.js';
 import { CurrentUser } from '../common/decorators/current-user.decorator.js';
 import { Roles } from '../common/decorators/roles.decorator.js';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard.js';
@@ -232,6 +234,55 @@ export class UsersController {
     @Query('search') search?: string,
   ) {
     return this.usersService.getAgentClients(userId, page, limit, search);
+  }
+
+  @Get('agent/profile')
+  @Roles(RoleType.AGENT, RoleType.ADMIN, RoleType.SUPER_ADMIN, RoleType.PROPERTY_MANAGER)
+  @ApiOperation({
+    summary:
+      'Get authenticated agent full professional profile, career metrics, and credentials',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Agent professional profile and aggregate career statistics',
+  })
+  getAgentProfile(@CurrentUser('id') userId: string) {
+    return this.usersService.getAgentProfile(userId);
+  }
+
+  @Patch('agent/profile')
+  @Roles(RoleType.AGENT, RoleType.ADMIN, RoleType.SUPER_ADMIN, RoleType.PROPERTY_MANAGER)
+  @ApiOperation({
+    summary:
+      'Update agent professional profile, specialties, bio, office address, and contact details',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Agent profile updated successfully',
+  })
+  updateAgentProfile(
+    @CurrentUser('id') userId: string,
+    @Body() dto: UpdateAgentProfileDto,
+  ) {
+    return this.usersService.updateAgentProfile(userId, dto);
+  }
+
+  @Public()
+  @Get('agents/public/:agentCode')
+  @ApiOperation({
+    summary:
+      'Public verified digital business card & showcase for an agent (active listings & verified customer reviews)',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Agent digital showcase card with active listings and client reviews',
+  })
+  @ApiResponse({
+    status: 404,
+    description: 'Agent profile not found or inactive',
+  })
+  getPublicAgentCard(@Param('agentCode') agentCode: string) {
+    return this.usersService.getPublicAgentCard(agentCode);
   }
 
   @Get('my-agent')

@@ -17,6 +17,7 @@ import { DeactivateAccountDto } from './dto/deactivate-account.dto.js';
 import { AgentPropertyQueryDto } from './dto/agent-property-query.dto.js';
 import { AgentLeadQueryDto } from './dto/agent-lead-query.dto.js';
 import { UpdateAgentLeadDto } from './dto/update-agent-lead.dto.js';
+import { UpdateAgentProfileDto } from './dto/update-agent-profile.dto.js';
 
 @Injectable()
 export class UsersService {
@@ -2386,6 +2387,389 @@ export class UsersService {
     return {
       message:
         'Your account has been deactivated successfully and all active sessions have been terminated. We hope to see you again.',
+    };
+  }
+
+  async getAgentProfile(userId: string) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      include: {
+        agentProfile: true,
+        userRoles: { include: { role: true } },
+      },
+    });
+
+    if (!user) {
+      throw new NotFoundException('User account not found');
+    }
+
+    const roles = user.userRoles.map((ur) => ur.role.name);
+    const isAgentOrAdmin = roles.some((r) =>
+      ['AGENT', 'ADMIN', 'SUPER_ADMIN', 'PROPERTY_MANAGER'].includes(r),
+    );
+
+    if (!isAgentOrAdmin) {
+      throw new ForbiddenException(
+        'Access denied: User is not registered as an agent or staff member',
+      );
+    }
+
+    let agentProfile = user.agentProfile;
+    if (!agentProfile) {
+      const uniqueCode = `NK-AGT-${Date.now().toString(36).toUpperCase().slice(-5)}`;
+      agentProfile = await this.prisma.agentProfile.create({
+        data: {
+          userId: user.id,
+          agentCode: uniqueCode,
+          agencyName: 'NIMI KINGS LTD',
+        },
+      });
+    }
+
+    // Real-time career metrics
+    const [assignedPropertiesCount, completedVisits, reviewStats, totalLeads] =
+      await Promise.all([
+        this.prisma.propertyAgent.count({
+          where: { agentId: userId, status: 'ACTIVE' },
+        }),
+        this.prisma.propertyInspection.count({
+          where: { agentId: userId, status: 'COMPLETED' },
+        }),
+        this.prisma.propertyInspection.findMany({
+          where: {
+            agentId: userId,
+            customerRating: { not: null },
+          },
+          select: { customerRating: true },
+        }),
+        this.prisma.propertyEnquiry.count({
+          where: { agentId: userId },
+        }),
+      ]);
+
+    const totalReviews = reviewStats.length;
+    const averageRating =
+      totalReviews > 0
+        ? Number(
+            (
+              reviewStats.reduce(
+                (sum, r) => sum + (r.customerRating ?? 0),
+                0,
+              ) / totalReviews
+            ).toFixed(1),
+          )
+        : null;
+
+    let parsedSpecialties: string[] = [];
+    if (agentProfile.specialties) {
+      try {
+        const parsed = JSON.parse(agentProfile.specialties);
+        parsedSpecialties = Array.isArray(parsed)
+          ? parsed
+          : [agentProfile.specialties];
+      } catch {
+        parsedSpecialties = agentProfile.specialties
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean);
+      }
+    }
+
+    return {
+      profile: {
+        id: user.id,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        email: user.email,
+        phone: user.phone,
+        status: user.status,
+        agentCode: agentProfile.agentCode,
+        licenseNumber: agentProfile.licenseNumber,
+        agencyName: agentProfile.agencyName || 'NIMI KINGS LTD',
+        specialties: parsedSpecialties,
+        yearsOfExperience: agentProfile.yearsOfExperience ?? 1,
+        officeAddress: agentProfile.officeAddress,
+        bio: agentProfile.bio,
+        profileImage: agentProfile.profileImage,
+        joinedAt: agentProfile.joinedAt,
+        roles,
+        verificationStatus: user.status === 'ACTIVE' ? 'VERIFIED' : 'PENDING',
+      },
+      careerStats: {
+        activeListingsCount: assignedPropertiesCount,
+        completedInspectionsCount: completedVisits,
+        totalLeadsManaged: totalLeads,
+        totalCustomerReviews: totalReviews,
+        averageRating,
+      },
+    };
+  }
+
+  async updateAgentProfile(userId: string, dto: UpdateAgentProfileDto) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      include: {
+        agentProfile: true,
+        userRoles: { include: { role: true } },
+      },
+    });
+
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+
+    const roles = user.userRoles.map((ur) => ur.role.name);
+    const isAgentOrAdmin = roles.some((r) =>
+      ['AGENT', 'ADMIN', 'SUPER_ADMIN', 'PROPERTY_MANAGER'].includes(r),
+    );
+
+    if (!isAgentOrAdmin) {
+      throw new ForbiddenException(
+        'Access denied: User is not authorized as an agent',
+      );
+    }
+
+    // Update user contact details if provided
+    const userUpdate: any = {};
+    if (dto.firstName) userUpdate.firstName = dto.firstName;
+    if (dto.lastName) userUpdate.lastName = dto.lastName;
+    if (dto.phone) userUpdate.phone = dto.phone;
+
+    if (Object.keys(userUpdate).length > 0) {
+      await this.prisma.user.update({
+        where: { id: userId },
+        data: userUpdate,
+      });
+    }
+
+    const serializedSpecialties =
+      dto.specialties !== undefined
+        ? JSON.stringify(dto.specialties)
+        : undefined;
+
+    const existingProfile = user.agentProfile;
+    const agentCode =
+      existingProfile?.agentCode ||
+      `NK-AGT-${Date.now().toString(36).toUpperCase().slice(-5)}`;
+
+    const oldValues = existingProfile
+      ? {
+          agencyName: existingProfile.agencyName,
+          licenseNumber: existingProfile.licenseNumber,
+          specialties: existingProfile.specialties,
+          yearsOfExperience: existingProfile.yearsOfExperience,
+          officeAddress: existingProfile.officeAddress,
+          bio: existingProfile.bio,
+          profileImage: existingProfile.profileImage,
+        }
+      : null;
+
+    await this.prisma.agentProfile.upsert({
+      where: { userId },
+      update: {
+        ...(dto.agencyName !== undefined ? { agencyName: dto.agencyName } : {}),
+        ...(dto.licenseNumber !== undefined
+          ? { licenseNumber: dto.licenseNumber }
+          : {}),
+        ...(serializedSpecialties !== undefined
+          ? { specialties: serializedSpecialties }
+          : {}),
+        ...(dto.yearsOfExperience !== undefined
+          ? { yearsOfExperience: dto.yearsOfExperience }
+          : {}),
+        ...(dto.officeAddress !== undefined
+          ? { officeAddress: dto.officeAddress }
+          : {}),
+        ...(dto.bio !== undefined ? { bio: dto.bio } : {}),
+        ...(dto.profileImage !== undefined
+          ? { profileImage: dto.profileImage }
+          : {}),
+      },
+      create: {
+        userId,
+        agentCode,
+        agencyName: dto.agencyName || 'NIMI KINGS LTD',
+        licenseNumber: dto.licenseNumber,
+        specialties: serializedSpecialties,
+        yearsOfExperience: dto.yearsOfExperience,
+        officeAddress: dto.officeAddress,
+        bio: dto.bio,
+        profileImage: dto.profileImage,
+      },
+    });
+
+    await this.auditService.log({
+      userId,
+      action: 'AGENT_PROFILE_UPDATED',
+      entityType: 'AgentProfile',
+      entityId: userId,
+      oldValues,
+      newValues: {
+        agencyName: dto.agencyName,
+        licenseNumber: dto.licenseNumber,
+        yearsOfExperience: dto.yearsOfExperience,
+        specialties: dto.specialties,
+        officeAddress: dto.officeAddress,
+      },
+    });
+
+    return {
+      message: 'Agent professional profile updated successfully',
+      data: await this.getAgentProfile(userId),
+    };
+  }
+
+  async getPublicAgentCard(agentCode: string) {
+    const profile = await this.prisma.agentProfile.findFirst({
+      where: {
+        OR: [
+          { agentCode },
+          { agentCode: agentCode.toUpperCase() },
+          { userId: agentCode },
+        ],
+      },
+      include: {
+        user: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+            phone: true,
+            status: true,
+            createdAt: true,
+          },
+        },
+      },
+    });
+
+    if (!profile || profile.user.status !== 'ACTIVE') {
+      throw new NotFoundException(
+        `Agent profile for code '${agentCode}' not found or is currently inactive`,
+      );
+    }
+
+    // Fetch active assigned properties portfolio with media & listing info
+    const assignedRecords = await this.prisma.propertyAgent.findMany({
+      where: {
+        agentId: profile.userId,
+        status: 'ACTIVE',
+        property: { deletedAt: null },
+      },
+      include: {
+        property: {
+          include: {
+            media: {
+              where: { isPrimary: true },
+              take: 1,
+            },
+            listings: {
+              where: { status: 'PUBLISHED' },
+              take: 1,
+            },
+          },
+        },
+      },
+      take: 8,
+    });
+
+    const activeListings = assignedRecords.map((rel) => {
+      const p = rel.property;
+      const listing = p.listings[0] || null;
+      return {
+        id: p.id,
+        propertyCode: p.propertyCode,
+        title: p.title,
+        propertyType: p.propertyType,
+        address: p.address,
+        city: p.city,
+        state: p.state,
+        price: listing?.price ? Number(listing.price) : null,
+        currency: listing?.currency || 'NGN',
+        listingType: listing?.listingType || 'FOR_SALE',
+        featuredImage: p.media[0]?.url || null,
+      };
+    });
+
+    // Fetch verified inspection customer reviews
+    const reviews = await this.prisma.propertyInspection.findMany({
+      where: {
+        agentId: profile.userId,
+        customerRating: { not: null },
+      },
+      include: {
+        customer: {
+          select: { firstName: true },
+        },
+        property: {
+          select: { title: true, propertyCode: true },
+        },
+      },
+      orderBy: { feedbackSubmittedAt: 'desc' },
+    });
+
+    const totalReviews = reviews.length;
+    const averageRating =
+      totalReviews > 0
+        ? Number(
+            (
+              reviews.reduce((sum, r) => sum + (r.customerRating ?? 0), 0) /
+              totalReviews
+            ).toFixed(1),
+          )
+        : null;
+
+    const recentReviews = reviews.slice(0, 6).map((r) => ({
+      rating: r.customerRating,
+      feedback: r.customerFeedback,
+      customerName: r.customer?.firstName
+        ? `${r.customer.firstName.charAt(0)}***`
+        : 'Verified Buyer',
+      propertyTitle: r.property?.title,
+      submittedAt: r.feedbackSubmittedAt,
+    }));
+
+    let parsedSpecialties: string[] = [];
+    if (profile.specialties) {
+      try {
+        const parsed = JSON.parse(profile.specialties);
+        parsedSpecialties = Array.isArray(parsed)
+          ? parsed
+          : [profile.specialties];
+      } catch {
+        parsedSpecialties = profile.specialties
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean);
+      }
+    }
+
+    return {
+      agent: {
+        agentCode: profile.agentCode,
+        firstName: profile.user.firstName,
+        lastName: profile.user.lastName,
+        agencyName: profile.agencyName || 'NIMI KINGS LTD',
+        licenseNumber: profile.licenseNumber,
+        specialties: parsedSpecialties,
+        yearsOfExperience: profile.yearsOfExperience ?? 1,
+        officeAddress: profile.officeAddress,
+        bio: profile.bio,
+        profileImage: profile.profileImage,
+        joinedAt: profile.joinedAt,
+        verificationStatus: 'VERIFIED',
+        contact: {
+          phone: profile.user.phone,
+          email: profile.user.email,
+        },
+      },
+      metrics: {
+        totalActiveListings: activeListings.length,
+        totalVerifiedReviews: totalReviews,
+        averageRating,
+      },
+      activeListings,
+      verifiedReviews: recentReviews,
     };
   }
 }
