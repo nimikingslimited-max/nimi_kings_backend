@@ -13,6 +13,8 @@ import { AssignPropertyAgentDto } from './dto/assign-property-agent.dto.js';
 import { InspectionQueryDto } from './dto/inspection-query.dto.js';
 import { RescheduleInspectionDto } from './dto/reschedule-inspection.dto.js';
 import { InspectionFeedbackDto } from './dto/inspection-feedback.dto.js';
+import { AgentInspectionReportDto } from './dto/agent-inspection-report.dto.js';
+import { ConfirmInspectionDto } from './dto/confirm-inspection.dto.js';
 
 @Injectable()
 export class InspectionsService {
@@ -859,5 +861,265 @@ export class InspectionsService {
     });
 
     return { message: 'Agent unassigned from property successfully' };
+  }
+
+  // ==========================================
+  // AGENT INSPECTION WORKFLOW & EXECUTION
+  // ==========================================
+
+  async submitAgentReport(
+    id: string,
+    currentUser: any,
+    dto: AgentInspectionReportDto,
+  ) {
+    const inspection = await this.prisma.propertyInspection.findUnique({
+      where: { id },
+      include: {
+        property: {
+          select: { id: true, title: true, propertyCode: true },
+        },
+        customer: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+            phone: true,
+          },
+        },
+        agent: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+          },
+        },
+      },
+    });
+
+    if (!inspection) {
+      throw new NotFoundException(`Inspection '${id}' not found`);
+    }
+
+    const isAdminOrManager = currentUser.roles?.some((r: string) =>
+      ['SUPER_ADMIN', 'ADMIN', 'PROPERTY_MANAGER'].includes(r),
+    );
+
+    if (!isAdminOrManager && inspection.agentId !== currentUser.id) {
+      throw new ForbiddenException(
+        'Only the assigned agent or an administrator can submit an inspection report',
+      );
+    }
+
+    if (inspection.status === 'CANCELLED') {
+      throw new BadRequestException(
+        'Cannot submit an inspection report for a cancelled visit',
+      );
+    }
+
+    const shouldComplete = dto.markAsCompleted !== false;
+    const oldStatus = inspection.status;
+
+    const updated = await this.prisma.propertyInspection.update({
+      where: { id },
+      data: {
+        agentReport: dto.agentReport,
+        outcome: dto.outcome,
+        ...(shouldComplete
+          ? {
+              status: 'COMPLETED',
+              completedAt: inspection.completedAt || new Date(),
+            }
+          : {}),
+      },
+      include: {
+        property: {
+          select: {
+            id: true,
+            propertyCode: true,
+            title: true,
+            address: true,
+            city: true,
+          },
+        },
+        customer: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+            phone: true,
+          },
+        },
+        agent: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+            phone: true,
+          },
+        },
+      },
+    });
+
+    // If completed, trigger in-app notification to customer inviting them to review and rate the visit
+    if (shouldComplete && oldStatus !== 'COMPLETED') {
+      await this.prisma.notification
+        .create({
+          data: {
+            userId: inspection.customerId,
+            type: 'INSPECTION_REMINDER',
+            title: 'Site Visit Completed – Rate Your Experience',
+            message: `Your site visit for ${inspection.property.title} with agent ${currentUser.firstName || 'your consultant'} has concluded. Please take a moment to rate your experience and leave your feedback.`,
+            data: {
+              inspectionId: id,
+              propertyId: inspection.propertyId,
+              completedAt: updated.completedAt,
+              outcome: dto.outcome,
+            },
+          },
+        })
+        .catch(() => {});
+    }
+
+    await this.auditService.log({
+      userId: currentUser.id,
+      action: 'INSPECTION_AGENT_REPORT_SUBMITTED',
+      entityType: 'PropertyInspection',
+      entityId: id,
+      newValues: {
+        outcome: dto.outcome,
+        status: updated.status,
+        completedAt: updated.completedAt,
+        hasReport: !!dto.agentReport,
+      },
+    });
+
+    return {
+      message: shouldComplete
+        ? 'Inspection report recorded and visit marked as completed'
+        : 'Inspection report recorded successfully',
+      inspection: updated,
+    };
+  }
+
+  async confirmByAgent(
+    id: string,
+    currentUser: any,
+    dto: ConfirmInspectionDto,
+  ) {
+    const inspection = await this.prisma.propertyInspection.findUnique({
+      where: { id },
+      include: {
+        property: {
+          select: { id: true, title: true, propertyCode: true },
+        },
+        customer: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+          },
+        },
+      },
+    });
+
+    if (!inspection) {
+      throw new NotFoundException(`Inspection '${id}' not found`);
+    }
+
+    const isAdminOrManager = currentUser.roles?.some((r: string) =>
+      ['SUPER_ADMIN', 'ADMIN', 'PROPERTY_MANAGER'].includes(r),
+    );
+
+    if (!isAdminOrManager && inspection.agentId !== currentUser.id) {
+      throw new ForbiddenException(
+        'Only the assigned agent or an administrator can confirm this inspection',
+      );
+    }
+
+    if (
+      inspection.status === 'COMPLETED' ||
+      inspection.status === 'CANCELLED'
+    ) {
+      throw new BadRequestException(
+        `Cannot confirm an inspection that is already ${inspection.status.toLowerCase()}`,
+      );
+    }
+
+    const updated = await this.prisma.propertyInspection.update({
+      where: { id },
+      data: {
+        status: 'CONFIRMED',
+        ...(dto.location !== undefined ? { location: dto.location } : {}),
+        ...(dto.notes !== undefined ? { notes: dto.notes } : {}),
+      },
+      include: {
+        property: {
+          select: {
+            id: true,
+            propertyCode: true,
+            title: true,
+            address: true,
+            city: true,
+          },
+        },
+        customer: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+            phone: true,
+          },
+        },
+        agent: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+            phone: true,
+          },
+        },
+      },
+    });
+
+    // Notify customer that the inspection appointment has been confirmed
+    await this.prisma.notification
+      .create({
+        data: {
+          userId: inspection.customerId,
+          type: 'INSPECTION_REMINDER',
+          title: 'Site Visit Confirmed by Agent',
+          message: `Your site inspection for ${inspection.property.title} scheduled on ${inspection.scheduledAt.toLocaleDateString()} at ${inspection.scheduledAt.toLocaleTimeString()} has been confirmed by your assigned agent.${dto.location ? ` Meeting Location: "${dto.location}"` : ''}`,
+          data: {
+            inspectionId: id,
+            propertyId: inspection.propertyId,
+            confirmedLocation: dto.location || inspection.location,
+          },
+        },
+      })
+      .catch(() => {});
+
+    await this.auditService.log({
+      userId: currentUser.id,
+      action: 'INSPECTION_CONFIRMED_BY_AGENT',
+      entityType: 'PropertyInspection',
+      entityId: id,
+      newValues: {
+        status: 'CONFIRMED',
+        location: dto.location,
+        notes: dto.notes,
+      },
+    });
+
+    return {
+      message: 'Inspection confirmed successfully',
+      inspection: updated,
+    };
   }
 }

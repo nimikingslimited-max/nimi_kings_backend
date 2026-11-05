@@ -22,6 +22,8 @@ import { AssignPropertyAgentDto } from './dto/assign-property-agent.dto.js';
 import { InspectionQueryDto } from './dto/inspection-query.dto.js';
 import { RescheduleInspectionDto } from './dto/reschedule-inspection.dto.js';
 import { InspectionFeedbackDto } from './dto/inspection-feedback.dto.js';
+import { AgentInspectionReportDto } from './dto/agent-inspection-report.dto.js';
+import { ConfirmInspectionDto } from './dto/confirm-inspection.dto.js';
 import { Roles } from '../common/decorators/roles.decorator.js';
 import { CurrentUser } from '../common/decorators/current-user.decorator.js';
 
@@ -179,6 +181,62 @@ export class InspectionsController {
     @CurrentUser() user: any,
   ) {
     return this.inspectionsService.update(id, dto, user);
+  }
+
+  @Roles(
+    RoleType.AGENT,
+    RoleType.PROPERTY_MANAGER,
+    RoleType.ADMIN,
+    RoleType.SUPER_ADMIN,
+  )
+  @Patch(':id/confirm')
+  @ApiOperation({
+    summary:
+      'Agent confirms an upcoming site inspection appointment and sets meeting location/instructions',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Inspection confirmed and customer notified',
+  })
+  @ApiResponse({
+    status: 403,
+    description: 'Only the assigned agent or admin can confirm the inspection',
+  })
+  confirmByAgent(
+    @Param('id') id: string,
+    @Body() dto: ConfirmInspectionDto,
+    @CurrentUser() user: any,
+  ) {
+    return this.inspectionsService.confirmByAgent(id, user, dto);
+  }
+
+  @Roles(
+    RoleType.AGENT,
+    RoleType.PROPERTY_MANAGER,
+    RoleType.ADMIN,
+    RoleType.SUPER_ADMIN,
+  )
+  @Patch(':id/agent-report')
+  @ApiOperation({
+    summary:
+      'Agent submits post-inspection debrief report, outcome, and optionally completes the visit',
+  })
+  @ApiResponse({
+    status: 200,
+    description:
+      'Inspection report recorded successfully and customer prompted for review if completed',
+  })
+  @ApiResponse({
+    status: 403,
+    description:
+      'Only the assigned agent or admin can submit report for this inspection',
+  })
+  submitAgentReport(
+    @Param('id') id: string,
+    @Body() dto: AgentInspectionReportDto,
+    @CurrentUser() user: any,
+  ) {
+    return this.inspectionsService.submitAgentReport(id, user, dto);
   }
 
   @Patch(':id/cancel')
