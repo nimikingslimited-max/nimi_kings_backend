@@ -12,6 +12,9 @@ import { AdminUserQueryDto } from './dto/admin-user-query.dto.js';
 import { UpdateUserStatusDto } from './dto/update-user-status.dto.js';
 import { UpdateUserRolesDto } from './dto/update-user-roles.dto.js';
 import { CreateStaffUserDto } from './dto/create-staff-user.dto.js';
+import { AdminPropertyQueryDto } from './dto/admin-property-query.dto.js';
+import { UpdateListingStatusDto } from './dto/update-listing-status.dto.js';
+import { AdminAssignAgentDto } from './dto/admin-assign-agent.dto.js';
 
 @Injectable()
 export class AdminService {
@@ -845,6 +848,454 @@ export class AdminService {
         temporaryPassword,
         note: 'Provide this temporary password securely to the staff member upon initial onboarding.',
       },
+    };
+  }
+
+  /**
+   * Paginated property catalog for administrators with deep filtering across listings, types, and agents.
+   */
+  async getProperties(query: AdminPropertyQueryDto) {
+    const page = query.page && query.page > 0 ? Number(query.page) : 1;
+    const limit = query.limit && query.limit > 0 ? Math.min(Number(query.limit), 100) : 10;
+    const skip = (page - 1) * limit;
+
+    const where: Prisma.PropertyWhereInput = {
+      deletedAt: null,
+    };
+
+    if (query.search) {
+      const term = query.search.trim();
+      where.OR = [
+        { title: { contains: term, mode: 'insensitive' } },
+        { propertyCode: { contains: term, mode: 'insensitive' } },
+        { address: { contains: term, mode: 'insensitive' } },
+        { city: { contains: term, mode: 'insensitive' } },
+        { state: { contains: term, mode: 'insensitive' } },
+      ];
+    }
+
+    if (query.propertyType) {
+      where.propertyType = query.propertyType;
+    }
+
+    if (query.listingStatus) {
+      where.listings = {
+        some: { status: query.listingStatus },
+      };
+    }
+
+    if (query.listingType) {
+      where.listings = {
+        some: { listingType: query.listingType },
+      };
+    }
+
+    if (query.agentId) {
+      where.assignedAgents = {
+        some: { agentId: query.agentId, status: 'ACTIVE' },
+      };
+    }
+
+    const validSortFields = ['createdAt', 'title', 'propertyCode', 'propertyType'];
+    const sortBy = validSortFields.includes(query.sortBy || '') ? query.sortBy : 'createdAt';
+    const sortOrder = query.sortOrder === 'asc' ? 'asc' : 'desc';
+
+    const [total, properties] = await Promise.all([
+      this.prisma.property.count({ where }),
+      this.prisma.property.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy: { [sortBy!]: sortOrder },
+        include: {
+          listings: true,
+          verification: {
+            select: {
+              status: true,
+              riskLevel: true,
+              verificationCode: true,
+            },
+          },
+          media: {
+            where: { isPrimary: true },
+            take: 1,
+          },
+          assignedAgents: {
+            where: { status: 'ACTIVE' },
+            include: {
+              property: false,
+            },
+          },
+          _count: {
+            select: {
+              inspections: true,
+              enquiries: true,
+            },
+          },
+        },
+      }),
+    ]);
+
+    // Fetch assigned agent details
+    const agentIds = Array.from(
+      new Set(properties.flatMap((p) => p.assignedAgents.map((a) => a.agentId))),
+    );
+    const agentUsers = await this.prisma.user.findMany({
+      where: { id: { in: agentIds } },
+      select: {
+        id: true,
+        firstName: true,
+        lastName: true,
+        email: true,
+        phone: true,
+        agentProfile: {
+          select: { agentCode: true, agencyName: true },
+        },
+      },
+    });
+    const agentMap = new Map(agentUsers.map((u) => [u.id, u]));
+
+    const items = properties.map((p) => {
+      const primaryListing = p.listings[0] || null;
+      return {
+        id: p.id,
+        propertyCode: p.propertyCode,
+        title: p.title,
+        propertyType: p.propertyType,
+        address: p.address,
+        city: p.city,
+        state: p.state,
+        createdAt: p.createdAt,
+        listing: primaryListing
+          ? {
+              id: primaryListing.id,
+              status: primaryListing.status,
+              listingType: primaryListing.listingType,
+              price: Number(primaryListing.price),
+              currency: primaryListing.currency,
+              paymentPlanAvailable: primaryListing.paymentPlanAvailable,
+              publishedAt: primaryListing.publishedAt,
+            }
+          : null,
+        verification: p.verification || {
+          status: 'NOT_SUBMITTED',
+          riskLevel: 'LOW',
+          verificationCode: null,
+        },
+        primaryMediaUrl: p.media[0]?.url || null,
+        assignedAgents: p.assignedAgents.map((rel) => {
+          const agent = agentMap.get(rel.agentId);
+          return {
+            agentId: rel.agentId,
+            assignedAt: rel.assignedAt,
+            name: agent ? `${agent.firstName} ${agent.lastName}` : 'Unknown',
+            email: agent?.email,
+            agentCode: agent?.agentProfile?.agentCode,
+            agencyName: agent?.agentProfile?.agencyName,
+          };
+        }),
+        stats: {
+          totalInspections: p._count.inspections,
+          totalEnquiries: p._count.enquiries,
+        },
+      };
+    });
+
+    return {
+      data: items,
+      meta: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit) || 1,
+      },
+    };
+  }
+
+  /**
+   * Get complete property dossier for administrators.
+   */
+  async getPropertyById(id: string) {
+    const property = await this.prisma.property.findFirst({
+      where: {
+        OR: [{ id }, { propertyCode: id }],
+        deletedAt: null,
+      },
+      include: {
+        listings: true,
+        media: {
+          orderBy: { sortOrder: 'asc' },
+        },
+        features: true,
+        verification: true,
+        assignedAgents: {
+          where: { status: 'ACTIVE' },
+        },
+        createdBy: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+          },
+        },
+        _count: {
+          select: {
+            inspections: true,
+            enquiries: true,
+          },
+        },
+      },
+    });
+
+    if (!property) {
+      throw new NotFoundException(`Property with ID '${id}' not found`);
+    }
+
+    // Fetch assigned agents info
+    const agentIds = property.assignedAgents.map((a) => a.agentId);
+    const agents = await this.prisma.user.findMany({
+      where: { id: { in: agentIds } },
+      select: {
+        id: true,
+        firstName: true,
+        lastName: true,
+        email: true,
+        phone: true,
+        agentProfile: {
+          select: { agentCode: true, agencyName: true },
+        },
+      },
+    });
+
+    return {
+      property: {
+        id: property.id,
+        propertyCode: property.propertyCode,
+        title: property.title,
+        description: property.description,
+        propertyType: property.propertyType,
+        landSize: property.landSize ? Number(property.landSize) : null,
+        landSizeUnit: property.landSizeUnit,
+        bedrooms: property.bedrooms,
+        bathrooms: property.bathrooms,
+        parkingSpaces: property.parkingSpaces,
+        address: property.address,
+        city: property.city,
+        state: property.state,
+        country: property.country,
+        latitude: property.latitude ? Number(property.latitude) : null,
+        longitude: property.longitude ? Number(property.longitude) : null,
+        createdAt: property.createdAt,
+        updatedAt: property.updatedAt,
+        createdBy: property.createdBy,
+      },
+      listings: property.listings.map((l) => ({
+        id: l.id,
+        status: l.status,
+        listingType: l.listingType,
+        price: Number(l.price),
+        currency: l.currency,
+        paymentPlanAvailable: l.paymentPlanAvailable,
+        publishedAt: l.publishedAt,
+      })),
+      media: property.media,
+      features: property.features,
+      verification: property.verification,
+      assignedAgents: agents.map((a) => ({
+        id: a.id,
+        name: `${a.firstName} ${a.lastName}`,
+        email: a.email,
+        phone: a.phone,
+        agentCode: a.agentProfile?.agentCode,
+        agencyName: a.agentProfile?.agencyName,
+      })),
+      engagement: {
+        totalInspections: property._count.inspections,
+        totalEnquiries: property._count.enquiries,
+      },
+    };
+  }
+
+  /**
+   * Governance: Update property commercial listing status (PUBLISHED, DRAFT, PENDING_APPROVAL, SUSPENDED, SOLD, RENTED, EXPIRED).
+   */
+  async updatePropertyListingStatus(propertyId: string, dto: UpdateListingStatusDto, adminId: string) {
+    const property = await this.prisma.property.findFirst({
+      where: {
+        OR: [{ id: propertyId }, { propertyCode: propertyId }],
+        deletedAt: null,
+      },
+      include: {
+        listings: true,
+      },
+    });
+
+    if (!property) {
+      throw new NotFoundException(`Property '${propertyId}' not found`);
+    }
+
+    if (property.listings.length === 0) {
+      throw new BadRequestException('Property has no active listings attached to update');
+    }
+
+    const listing = property.listings[0];
+    const oldStatus = listing.status;
+
+    const updatedListing = await this.prisma.propertyListing.update({
+      where: { id: listing.id },
+      data: {
+        status: dto.status,
+        publishedAt: dto.status === 'PUBLISHED' && !listing.publishedAt ? new Date() : undefined,
+      },
+    });
+
+    await this.auditService.log({
+      userId: adminId,
+      action: `ADMIN_PROPERTY_LISTING_STATUS_${dto.status}`,
+      entityType: 'PropertyListing',
+      entityId: listing.id,
+      oldValues: { status: oldStatus },
+      newValues: { status: dto.status, reason: dto.reason },
+    });
+
+    return {
+      message: `Property '${property.propertyCode}' listing status updated to ${dto.status} successfully`,
+      propertyId: property.id,
+      propertyCode: property.propertyCode,
+      listingId: updatedListing.id,
+      status: updatedListing.status,
+      publishedAt: updatedListing.publishedAt,
+    };
+  }
+
+  /**
+   * Assign or reassign field agent to a property.
+   */
+  async assignAgentToProperty(propertyId: string, dto: AdminAssignAgentDto, adminId: string) {
+    const property = await this.prisma.property.findFirst({
+      where: {
+        OR: [{ id: propertyId }, { propertyCode: propertyId }],
+        deletedAt: null,
+      },
+    });
+
+    if (!property) {
+      throw new NotFoundException(`Property '${propertyId}' not found`);
+    }
+
+    const agent = await this.prisma.user.findUnique({
+      where: { id: dto.agentId },
+      include: {
+        userRoles: { include: { role: true } },
+        agentProfile: true,
+      },
+    });
+
+    if (!agent || agent.status !== 'ACTIVE') {
+      throw new BadRequestException('Agent must be an active registered user');
+    }
+
+    const isAgent = agent.userRoles.some((ur) => ur.role.name === 'AGENT');
+    if (!isAgent) {
+      throw new BadRequestException('Assigned user must possess the AGENT system role');
+    }
+
+    const assignment = await this.prisma.propertyAgent.upsert({
+      where: {
+        propertyId_agentId: {
+          propertyId: property.id,
+          agentId: agent.id,
+        },
+      },
+      update: {
+        status: 'ACTIVE',
+        assignedBy: adminId,
+        assignedAt: new Date(),
+      },
+      create: {
+        propertyId: property.id,
+        agentId: agent.id,
+        assignedBy: adminId,
+        status: 'ACTIVE',
+      },
+    });
+
+    // Notify agent
+    await this.prisma.notification
+      .create({
+        data: {
+          userId: agent.id,
+          type: 'PROPERTY_STATUS_CHANGED',
+          title: 'Assigned as Dedicated Agent',
+          message: `You have been assigned by management to handle inquiries and inspections for property: "${property.title}" (${property.propertyCode}).`,
+          data: { propertyId: property.id, propertyCode: property.propertyCode },
+        },
+      })
+      .catch(() => {});
+
+    await this.auditService.log({
+      userId: adminId,
+      action: 'ADMIN_PROPERTY_AGENT_ASSIGNED',
+      entityType: 'Property',
+      entityId: property.id,
+      newValues: {
+        agentId: agent.id,
+        agentEmail: agent.email,
+        propertyCode: property.propertyCode,
+      },
+    });
+
+    return {
+      message: 'Agent assigned to property successfully',
+      propertyId: property.id,
+      agent: {
+        id: agent.id,
+        name: `${agent.firstName} ${agent.lastName}`,
+        email: agent.email,
+        agentCode: agent.agentProfile?.agentCode,
+      },
+      assignment,
+    };
+  }
+
+  /**
+   * Remove field agent assignment from a property.
+   */
+  async removeAgentFromProperty(propertyId: string, agentId: string, adminId: string) {
+    const property = await this.prisma.property.findFirst({
+      where: {
+        OR: [{ id: propertyId }, { propertyCode: propertyId }],
+        deletedAt: null,
+      },
+    });
+
+    if (!property) {
+      throw new NotFoundException(`Property '${propertyId}' not found`);
+    }
+
+    await this.prisma.propertyAgent.updateMany({
+      where: {
+        propertyId: property.id,
+        agentId,
+      },
+      data: {
+        status: 'INACTIVE',
+      },
+    });
+
+    await this.auditService.log({
+      userId: adminId,
+      action: 'ADMIN_PROPERTY_AGENT_REMOVED',
+      entityType: 'Property',
+      entityId: property.id,
+      newValues: { agentId, propertyCode: property.propertyCode },
+    });
+
+    return {
+      message: 'Agent unassigned from property successfully',
+      propertyId: property.id,
+      agentId,
     };
   }
 }

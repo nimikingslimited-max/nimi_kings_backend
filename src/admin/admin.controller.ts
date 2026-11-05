@@ -3,6 +3,7 @@ import {
   Get,
   Post,
   Patch,
+  Delete,
   Body,
   Param,
   Query,
@@ -21,6 +22,9 @@ import { AdminUserQueryDto } from './dto/admin-user-query.dto.js';
 import { UpdateUserStatusDto } from './dto/update-user-status.dto.js';
 import { UpdateUserRolesDto } from './dto/update-user-roles.dto.js';
 import { CreateStaffUserDto } from './dto/create-staff-user.dto.js';
+import { AdminPropertyQueryDto } from './dto/admin-property-query.dto.js';
+import { UpdateListingStatusDto } from './dto/update-listing-status.dto.js';
+import { AdminAssignAgentDto } from './dto/admin-assign-agent.dto.js';
 import { Roles } from '../common/decorators/roles.decorator.js';
 import { CurrentUser } from '../common/decorators/current-user.decorator.js';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard.js';
@@ -156,5 +160,98 @@ export class AdminController {
     @CurrentUser('id') adminId: string,
   ) {
     return this.adminService.createStaffUser(dto, adminId);
+  }
+
+  // ==========================================
+  // PROPERTY CATALOG & LISTING GOVERNANCE
+  // ==========================================
+
+  @Get('properties')
+  @Roles(RoleType.ADMIN, RoleType.SUPER_ADMIN, RoleType.PROPERTY_MANAGER)
+  @ApiOperation({
+    summary:
+      'List and filter all properties in catalog (search, filter by type, listing status, transaction type, assigned agent)',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Paginated properties catalog with commercial listing metadata',
+  })
+  getProperties(@Query() query: AdminPropertyQueryDto) {
+    return this.adminService.getProperties(query);
+  }
+
+  @Get('properties/:id')
+  @Roles(RoleType.ADMIN, RoleType.SUPER_ADMIN, RoleType.PROPERTY_MANAGER)
+  @ApiOperation({
+    summary:
+      'Get full administrative property dossier (listings, media, features, legal verifications, assigned agents)',
+  })
+  @ApiParam({ name: 'id', description: 'Property UUID or unique propertyCode' })
+  @ApiResponse({
+    status: 200,
+    description: 'Full property details',
+  })
+  @ApiResponse({
+    status: 404,
+    description: 'Property not found',
+  })
+  getPropertyById(@Param('id') id: string) {
+    return this.adminService.getPropertyById(id);
+  }
+
+  @Patch('properties/:id/listing-status')
+  @Roles(RoleType.ADMIN, RoleType.SUPER_ADMIN, RoleType.PROPERTY_MANAGER)
+  @ApiOperation({
+    summary:
+      'Governance: Update property commercial listing status (PUBLISHED, DRAFT, PENDING_APPROVAL, SUSPENDED, SOLD, RENTED, EXPIRED)',
+  })
+  @ApiParam({ name: 'id', description: 'Property UUID or propertyCode' })
+  @ApiResponse({
+    status: 200,
+    description: 'Property listing status updated successfully',
+  })
+  updatePropertyListingStatus(
+    @Param('id') id: string,
+    @Body() dto: UpdateListingStatusDto,
+    @CurrentUser('id') adminId: string,
+  ) {
+    return this.adminService.updatePropertyListingStatus(id, dto, adminId);
+  }
+
+  @Post('properties/:id/assign-agent')
+  @Roles(RoleType.ADMIN, RoleType.SUPER_ADMIN, RoleType.PROPERTY_MANAGER)
+  @ApiOperation({
+    summary: 'Assign or reassign a dedicated field agent to a property',
+  })
+  @ApiParam({ name: 'id', description: 'Property UUID or propertyCode' })
+  @ApiResponse({
+    status: 201,
+    description: 'Agent assigned to property and notified',
+  })
+  assignAgentToProperty(
+    @Param('id') id: string,
+    @Body() dto: AdminAssignAgentDto,
+    @CurrentUser('id') adminId: string,
+  ) {
+    return this.adminService.assignAgentToProperty(id, dto, adminId);
+  }
+
+  @Delete('properties/:id/agents/:agentId')
+  @Roles(RoleType.ADMIN, RoleType.SUPER_ADMIN, RoleType.PROPERTY_MANAGER)
+  @ApiOperation({
+    summary: 'Unassign a field agent from a property',
+  })
+  @ApiParam({ name: 'id', description: 'Property UUID or propertyCode' })
+  @ApiParam({ name: 'agentId', description: 'Agent user UUID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Agent unassigned from property',
+  })
+  removeAgentFromProperty(
+    @Param('id') id: string,
+    @Param('agentId') agentId: string,
+    @CurrentUser('id') adminId: string,
+  ) {
+    return this.adminService.removeAgentFromProperty(id, agentId, adminId);
   }
 }
