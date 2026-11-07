@@ -26,6 +26,9 @@ import { UpdateMilestoneDto } from './dto/update-milestone.dto.js';
 import { CreateProjectUpdateDto } from './dto/create-project-update.dto.js';
 import { UpdateProjectUpdateDto } from './dto/update-project-update.dto.js';
 import { ProjectUpdateQueryDto } from './dto/project-update-query.dto.js';
+import { CreateProjectExpenseDto } from './dto/create-project-expense.dto.js';
+import { UpdateProjectExpenseDto } from './dto/update-project-expense.dto.js';
+import { ProjectExpenseQueryDto } from './dto/project-expense-query.dto.js';
 import { Roles } from '../common/decorators/roles.decorator.js';
 import { CurrentUser } from '../common/decorators/current-user.decorator.js';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard.js';
@@ -364,6 +367,150 @@ export class ConstructionController {
   ) {
     const roles = Array.isArray(user.roles) ? user.roles : [];
     return this.constructionService.deleteProjectUpdate(id, user.id, roles);
+  }
+
+
+  // ==========================================
+  // FEATURE 4: FINANCIALS & EXPENSE LEDGER
+  // ==========================================
+
+  @Post('projects/:projectId/expenses')
+  @Roles(
+    RoleType.ADMIN,
+    RoleType.SUPER_ADMIN,
+    RoleType.CONSTRUCTION_MANAGER,
+    RoleType.FINANCE_OFFICER,
+  )
+  @ApiOperation({
+    summary:
+      'Record an expenditure against a project budget in the financial ledger',
+  })
+  @ApiParam({ name: 'projectId', description: 'Construction Project UUID' })
+  @ApiResponse({
+    status: 201,
+    description: 'Expense logged successfully with updated financial snapshot',
+  })
+  recordExpense(
+    @Param('projectId') projectId: string,
+    @Body() dto: CreateProjectExpenseDto,
+    @CurrentUser('id') recorderId: string,
+  ) {
+    return this.constructionService.recordExpense(projectId, dto, recorderId);
+  }
+
+  @Get('projects/:projectId/expenses')
+  @Roles(
+    RoleType.ADMIN,
+    RoleType.SUPER_ADMIN,
+    RoleType.CONSTRUCTION_MANAGER,
+    RoleType.FINANCE_OFFICER,
+    RoleType.PROPERTY_MANAGER,
+  )
+  @ApiOperation({
+    summary:
+      'Retrieve paginated expense ledger for a project with category, date, and amount filters',
+  })
+  @ApiParam({ name: 'projectId', description: 'Construction Project UUID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Paginated expense records',
+  })
+  getProjectExpenses(
+    @Param('projectId') projectId: string,
+    @Query() query: ProjectExpenseQueryDto,
+  ) {
+    return this.constructionService.getProjectExpenses(projectId, query);
+  }
+
+  @Get('projects/:projectId/financial-summary')
+  @Roles(
+    RoleType.ADMIN,
+    RoleType.SUPER_ADMIN,
+    RoleType.CONSTRUCTION_MANAGER,
+    RoleType.FINANCE_OFFICER,
+    RoleType.PROPERTY_MANAGER,
+  )
+  @ApiOperation({
+    summary:
+      'Retrieve holistic financial health summary (budget, actual spend, variance, % utilization, category breakdown)',
+  })
+  @ApiParam({ name: 'projectId', description: 'Construction Project UUID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Comprehensive financial health report',
+  })
+  getProjectFinancialSummary(@Param('projectId') projectId: string) {
+    return this.constructionService.getProjectFinancialSummary(projectId);
+  }
+
+  @Get('expenses/:id')
+  @Roles(
+    RoleType.ADMIN,
+    RoleType.SUPER_ADMIN,
+    RoleType.CONSTRUCTION_MANAGER,
+    RoleType.FINANCE_OFFICER,
+    RoleType.PROPERTY_MANAGER,
+  )
+  @ApiOperation({
+    summary: 'Get details of a single recorded expenditure by UUID',
+  })
+  @ApiParam({ name: 'id', description: 'Expense UUID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Expense record details',
+  })
+  @ApiResponse({
+    status: 404,
+    description: 'Expense record not found',
+  })
+  getExpenseById(@Param('id') id: string) {
+    return this.constructionService.getExpenseById(id);
+  }
+
+  @Patch('expenses/:id')
+  @Roles(
+    RoleType.ADMIN,
+    RoleType.SUPER_ADMIN,
+    RoleType.CONSTRUCTION_MANAGER,
+    RoleType.FINANCE_OFFICER,
+  )
+  @ApiOperation({
+    summary: 'Update an existing expense entry (amount, category, description, date)',
+  })
+  @ApiParam({ name: 'id', description: 'Expense UUID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Expense record updated successfully',
+  })
+  updateExpense(
+    @Param('id') id: string,
+    @Body() dto: UpdateProjectExpenseDto,
+    @CurrentUser() user: { id: string; roles?: string[] },
+  ) {
+    const roles = Array.isArray(user.roles) ? user.roles : [];
+    return this.constructionService.updateExpense(id, dto, user.id, roles);
+  }
+
+  @Delete('expenses/:id')
+  @Roles(
+    RoleType.ADMIN,
+    RoleType.SUPER_ADMIN,
+    RoleType.FINANCE_OFFICER,
+  )
+  @ApiOperation({
+    summary: 'Delete an expense record from the ledger',
+  })
+  @ApiParam({ name: 'id', description: 'Expense UUID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Expense record deleted successfully',
+  })
+  deleteExpense(
+    @Param('id') id: string,
+    @CurrentUser() user: { id: string; roles?: string[] },
+  ) {
+    const roles = Array.isArray(user.roles) ? user.roles : [];
+    return this.constructionService.deleteExpense(id, user.id, roles);
   }
 
 }

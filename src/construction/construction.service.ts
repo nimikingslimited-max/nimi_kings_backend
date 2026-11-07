@@ -15,6 +15,9 @@ import { UpdateMilestoneDto } from './dto/update-milestone.dto.js';
 import { CreateProjectUpdateDto } from './dto/create-project-update.dto.js';
 import { UpdateProjectUpdateDto } from './dto/update-project-update.dto.js';
 import { ProjectUpdateQueryDto } from './dto/project-update-query.dto.js';
+import { CreateProjectExpenseDto } from './dto/create-project-expense.dto.js';
+import { UpdateProjectExpenseDto } from './dto/update-project-expense.dto.js';
+import { ProjectExpenseQueryDto } from './dto/project-expense-query.dto.js';
 
 @Injectable()
 export class ConstructionService {
@@ -1388,6 +1391,466 @@ export class ConstructionService {
     return {
       message: `Project update '${existing.title}' deleted successfully`,
       id: updateId,
+      projectId: existing.projectId,
+    };
+  }
+
+
+  // ==========================================
+  // FEATURE 4: PROJECT FINANCIALS & EXPENSES
+  // ==========================================
+
+  /**
+   * Record a new project expenditure in the financial ledger.
+   */
+  async recordExpense(
+    projectId: string,
+    dto: CreateProjectExpenseDto,
+    recorderId: string,
+  ) {
+    const project = await this.prisma.constructionProject.findUnique({
+      where: { id: projectId },
+      select: { id: true, name: true, budget: true, projectCode: true, projectManagerId: true },
+    });
+
+    if (!project) {
+      throw new NotFoundException(`Construction project with ID '${projectId}' not found`);
+    }
+
+    const expense = await this.prisma.projectExpense.create({
+      data: {
+        projectId,
+        category: dto.category.trim().toUpperCase(),
+        description: dto.description.trim(),
+        amount: dto.amount,
+        currency: dto.currency ? dto.currency.toUpperCase() : 'NGN',
+        expenseDate: dto.expenseDate ? new Date(dto.expenseDate) : new Date(),
+        recordedById: recorderId,
+      },
+      include: {
+        recordedBy: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+          },
+        },
+      },
+    });
+
+    // Check financial health & budget utilization
+    const agg = await this.prisma.projectExpense.aggregate({
+      where: { projectId },
+      _sum: { amount: true },
+    });
+    const totalExpenses = Number(agg._sum.amount || 0);
+    const budget = Number(project.budget);
+    const isOverBudget = totalExpenses > budget;
+    const utilizationPercentage = budget > 0 ? (totalExpenses / budget) * 100 : 0;
+
+    await this.auditService.log({
+      userId: recorderId,
+      action: 'CONSTRUCTION_EXPENSE_RECORDED',
+      entityType: 'ProjectExpense',
+      entityId: expense.id,
+      newValues: {
+        projectId,
+        category: expense.category,
+        amount: expense.amount,
+        currency: expense.currency,
+        cumulativeExpenses: totalExpenses,
+        budget,
+        isOverBudget,
+      },
+    });
+
+    return {
+      message: 'Project expense recorded successfully',
+      expense: {
+        id: expense.id,
+        projectId: expense.projectId,
+        category: expense.category,
+        description: expense.description,
+        amount: Number(expense.amount),
+        currency: expense.currency,
+        expenseDate: expense.expenseDate,
+        recordedBy: expense.recordedBy,
+      },
+      financialSnapshot: {
+        budget,
+        totalExpenses,
+        remainingBudget: budget - totalExpenses,
+        utilizationPercentage: Number(utilizationPercentage.toFixed(2)),
+        isOverBudget,
+      },
+    };
+  }
+
+  /**
+   * Retrieve paginated ledger of expenses for a construction project with filters.
+   */
+  async getProjectExpenses(projectId: string, query: ProjectExpenseQueryDto) {
+    const project = await this.prisma.constructionProject.findUnique({
+      where: { id: projectId },
+      select: { id: true, name: true, projectCode: true, budget: true },
+    });
+
+    if (!project) {
+      throw new NotFoundException(`Construction project with ID '${projectId}' not found`);
+    }
+
+    const page = Math.max(1, query.page || 1);
+    const limit = Math.max(1, Math.min(100, query.limit || 10));
+    const skip = (page - 1) * limit;
+
+    const where: Prisma.ProjectExpenseWhereInput = {
+      projectId,
+    };
+
+    if (query.category) {
+      where.category = {
+        contains: query.category.trim(),
+        mode: 'insensitive',
+      };
+    }
+
+    if (query.startDate || query.endDate) {
+      where.expenseDate = {};
+      if (query.startDate) where.expenseDate.gte = new Date(query.startDate);
+      if (query.endDate) where.expenseDate.lte = new Date(query.endDate);
+    }
+
+    if (query.minAmount !== undefined || query.maxAmount !== undefined) {
+      where.amount = {};
+      if (query.minAmount !== undefined) where.amount.gte = query.minAmount;
+      if (query.maxAmount !== undefined) where.amount.lte = query.maxAmount;
+    }
+
+    const [expenses, total, sumFiltered, aggProject] = await Promise.all([
+      this.prisma.projectExpense.findMany({
+        where,
+        include: {
+          recordedBy: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              email: true,
+            },
+          },
+        },
+        orderBy: { expenseDate: 'desc' },
+        skip,
+        take: limit,
+      }),
+      this.prisma.projectExpense.count({ where }),
+      this.prisma.projectExpense.aggregate({
+        where,
+        _sum: { amount: true },
+      }),
+      this.prisma.projectExpense.aggregate({
+        where: { projectId },
+        _sum: { amount: true },
+      }),
+    ]);
+
+    const totalProjectExpenses = Number(aggProject._sum.amount || 0);
+    const budget = Number(project.budget);
+
+    return {
+      project: {
+        id: project.id,
+        projectCode: project.projectCode,
+        name: project.name,
+        budget,
+      },
+      expenses: expenses.map((e) => ({
+        id: e.id,
+        category: e.category,
+        description: e.description,
+        amount: Number(e.amount),
+        currency: e.currency,
+        expenseDate: e.expenseDate,
+        recordedBy: e.recordedBy,
+      })),
+      meta: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit) || 1,
+        hasMore: page * limit < total,
+        filteredSum: Number(sumFiltered._sum.amount || 0),
+        totalProjectExpenses,
+        remainingBudget: budget - totalProjectExpenses,
+      },
+    };
+  }
+
+  /**
+   * Retrieve holistic financial health summary and category breakdown for a project.
+   */
+  async getProjectFinancialSummary(projectId: string) {
+    const project = await this.prisma.constructionProject.findUnique({
+      where: { id: projectId },
+      select: {
+        id: true,
+        projectCode: true,
+        name: true,
+        status: true,
+        budget: true,
+        startDate: true,
+        expectedEndDate: true,
+      },
+    });
+
+    if (!project) {
+      throw new NotFoundException(`Construction project with ID '${projectId}' not found`);
+    }
+
+    const [aggTotal, categoryGroups, recentExpenses] = await Promise.all([
+      this.prisma.projectExpense.aggregate({
+        where: { projectId },
+        _sum: { amount: true },
+        _count: { id: true },
+      }),
+      this.prisma.projectExpense.groupBy({
+        by: ['category'],
+        where: { projectId },
+        _sum: { amount: true },
+        _count: { id: true },
+      }),
+      this.prisma.projectExpense.findMany({
+        where: { projectId },
+        orderBy: { expenseDate: 'desc' },
+        take: 5,
+        include: {
+          recordedBy: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              email: true,
+            },
+          },
+        },
+      }),
+    ]);
+
+    const budget = Number(project.budget);
+    const totalExpenses = Number(aggTotal._sum.amount || 0);
+    const remainingBudget = budget - totalExpenses;
+    const utilizationPercentage = budget > 0 ? (totalExpenses / budget) * 100 : 0;
+    const isOverBudget = totalExpenses > budget;
+
+    const categoryBreakdown = categoryGroups.map((cg) => {
+      const sum = Number(cg._sum.amount || 0);
+      return {
+        category: cg.category,
+        totalAmount: sum,
+        expenseCount: cg._count.id,
+        percentageOfTotalSpend:
+          totalExpenses > 0 ? Number(((sum / totalExpenses) * 100).toFixed(2)) : 0,
+      };
+    }).sort((a, b) => b.totalAmount - a.totalAmount);
+
+    return {
+      project: {
+        id: project.id,
+        projectCode: project.projectCode,
+        name: project.name,
+        status: project.status,
+        budget,
+        startDate: project.startDate,
+        expectedEndDate: project.expectedEndDate,
+      },
+      financialSummary: {
+        budget,
+        totalExpenses,
+        remainingBudget,
+        utilizationPercentage: Number(utilizationPercentage.toFixed(2)),
+        isOverBudget,
+        totalTransactionsCount: aggTotal._count.id,
+      },
+      categoryBreakdown,
+      recentExpenses: recentExpenses.map((e) => ({
+        id: e.id,
+        category: e.category,
+        description: e.description,
+        amount: Number(e.amount),
+        currency: e.currency,
+        expenseDate: e.expenseDate,
+        recordedBy: e.recordedBy,
+      })),
+    };
+  }
+
+  /**
+   * Get single expense details by UUID.
+   */
+  async getExpenseById(id: string) {
+    const expense = await this.prisma.projectExpense.findUnique({
+      where: { id },
+      include: {
+        project: {
+          select: {
+            id: true,
+            projectCode: true,
+            name: true,
+            budget: true,
+          },
+        },
+        recordedBy: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+          },
+        },
+      },
+    });
+
+    if (!expense) {
+      throw new NotFoundException(`Expense record with ID '${id}' not found`);
+    }
+
+    return {
+      id: expense.id,
+      project: {
+        ...expense.project,
+        budget: Number(expense.project.budget),
+      },
+      category: expense.category,
+      description: expense.description,
+      amount: Number(expense.amount),
+      currency: expense.currency,
+      expenseDate: expense.expenseDate,
+      recordedBy: expense.recordedBy,
+    };
+  }
+
+  /**
+   * Update an existing expense record.
+   */
+  async updateExpense(
+    id: string,
+    dto: UpdateProjectExpenseDto,
+    editorId: string,
+    userRoles: string[],
+  ) {
+    const existing = await this.prisma.projectExpense.findUnique({
+      where: { id },
+    });
+
+    if (!existing) {
+      throw new NotFoundException(`Expense record with ID '${id}' not found`);
+    }
+
+    const isAdminOrFinance = userRoles.some((r) =>
+      ['ADMIN', 'SUPER_ADMIN', 'FINANCE_OFFICER'].includes(r.toUpperCase()),
+    );
+    if (!isAdminOrFinance && existing.recordedById !== editorId) {
+      throw new ForbiddenException(
+        'Only an administrator, finance officer, or the original recorder can update this expense',
+      );
+    }
+
+    const updated = await this.prisma.projectExpense.update({
+      where: { id },
+      data: {
+        category: dto.category !== undefined ? dto.category.trim().toUpperCase() : undefined,
+        description: dto.description !== undefined ? dto.description.trim() : undefined,
+        amount: dto.amount !== undefined ? dto.amount : undefined,
+        currency: dto.currency !== undefined ? dto.currency.toUpperCase() : undefined,
+        expenseDate: dto.expenseDate !== undefined ? new Date(dto.expenseDate) : undefined,
+      },
+      include: {
+        recordedBy: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+          },
+        },
+      },
+    });
+
+    await this.auditService.log({
+      userId: editorId,
+      action: 'CONSTRUCTION_EXPENSE_UPDATED',
+      entityType: 'ProjectExpense',
+      entityId: id,
+      oldValues: {
+        amount: existing.amount,
+        category: existing.category,
+      },
+      newValues: {
+        amount: updated.amount,
+        category: updated.category,
+      },
+    });
+
+    return {
+      message: 'Expense record updated successfully',
+      expense: {
+        id: updated.id,
+        projectId: updated.projectId,
+        category: updated.category,
+        description: updated.description,
+        amount: Number(updated.amount),
+        currency: updated.currency,
+        expenseDate: updated.expenseDate,
+        recordedBy: updated.recordedBy,
+      },
+    };
+  }
+
+  /**
+   * Delete an expense record.
+   */
+  async deleteExpense(
+    id: string,
+    deleterId: string,
+    userRoles: string[],
+  ) {
+    const existing = await this.prisma.projectExpense.findUnique({
+      where: { id },
+    });
+
+    if (!existing) {
+      throw new NotFoundException(`Expense record with ID '${id}' not found`);
+    }
+
+    const isAdminOrFinance = userRoles.some((r) =>
+      ['ADMIN', 'SUPER_ADMIN', 'FINANCE_OFFICER'].includes(r.toUpperCase()),
+    );
+    if (!isAdminOrFinance && existing.recordedById !== deleterId) {
+      throw new ForbiddenException(
+        'Only an administrator, finance officer, or the author can delete this expense',
+      );
+    }
+
+    await this.prisma.projectExpense.delete({
+      where: { id },
+    });
+
+    await this.auditService.log({
+      userId: deleterId,
+      action: 'CONSTRUCTION_EXPENSE_DELETED',
+      entityType: 'ProjectExpense',
+      entityId: id,
+      oldValues: {
+        projectId: existing.projectId,
+        amount: existing.amount,
+        category: existing.category,
+      },
+    });
+
+    return {
+      message: 'Expense record deleted successfully',
+      id,
       projectId: existing.projectId,
     };
   }
