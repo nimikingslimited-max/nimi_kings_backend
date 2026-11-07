@@ -16,6 +16,7 @@ import { NotificationsModule } from './notifications/notifications.module.js';
 import { MessagingModule } from './messaging/messaging.module.js';
 import { AuditModule } from './common/audit/audit.module.js';
 import { AdminModule } from './admin/admin.module.js';
+import { ConstructionModule } from './construction/construction.module.js';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard.js';
 import { RolesGuard } from './common/guards/roles.guard.js';
 
@@ -37,6 +38,7 @@ import { RolesGuard } from './common/guards/roles.guard.js';
     InspectionsModule,
     NotificationsModule,
     MessagingModule,
+    ConstructionModule,
   ],
   controllers: [AppController],
   providers: [
