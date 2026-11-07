@@ -2,6 +2,7 @@ import {
   Injectable,
   NotFoundException,
   BadRequestException,
+  ForbiddenException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../common/prisma/prisma.service.js';
@@ -11,6 +12,9 @@ import { UpdateConstructionProjectDto } from './dto/update-construction-project.
 import { ConstructionProjectQueryDto } from './dto/construction-project-query.dto.js';
 import { CreateMilestoneDto } from './dto/create-milestone.dto.js';
 import { UpdateMilestoneDto } from './dto/update-milestone.dto.js';
+import { CreateProjectUpdateDto } from './dto/create-project-update.dto.js';
+import { UpdateProjectUpdateDto } from './dto/update-project-update.dto.js';
+import { ProjectUpdateQueryDto } from './dto/project-update-query.dto.js';
 
 @Injectable()
 export class ConstructionService {
@@ -899,4 +903,493 @@ export class ConstructionService {
       projectId: milestone.projectId,
     };
   }
+
+  // ==========================================
+  // FEATURE 3: FIELD PROGRESS UPDATES & MEDIA
+  // ==========================================
+
+  /**
+   * Record a new field progress update with % completion, observations, and site media.
+   */
+  async createProjectUpdate(
+    projectId: string,
+    dto: CreateProjectUpdateDto,
+    authorId: string,
+  ) {
+    const project = await this.prisma.constructionProject.findUnique({
+      where: { id: projectId },
+      include: {
+        property: {
+          select: { id: true, title: true, createdById: true },
+        },
+      },
+    });
+
+    if (!project) {
+      throw new NotFoundException(`Construction project with ID '${projectId}' not found`);
+    }
+
+    if (dto.milestoneId) {
+      const milestone = await this.prisma.constructionMilestone.findFirst({
+        where: { id: dto.milestoneId, projectId },
+      });
+      if (!milestone) {
+        throw new BadRequestException(
+          `Milestone with ID '${dto.milestoneId}' does not belong to project '${projectId}'`,
+        );
+      }
+    }
+
+    // Advance project status if still in PLANNED state
+    if (project.status === 'PLANNED') {
+      await this.prisma.constructionProject.update({
+        where: { id: projectId },
+        data: { status: 'IN_PROGRESS' },
+      });
+    }
+
+    const createdUpdate = await this.prisma.projectUpdate.create({
+      data: {
+        projectId,
+        milestoneId: dto.milestoneId || null,
+        createdById: authorId,
+        title: dto.title.trim(),
+        description: dto.description.trim(),
+        progressPercentage: dto.progressPercentage,
+        media:
+          dto.media && dto.media.length > 0
+            ? {
+                create: dto.media.map((m) => ({
+                  type: m.type || 'IMAGE',
+                  url: m.url.trim(),
+                  storageKey: m.storageKey.trim(),
+                })),
+              }
+            : undefined,
+      },
+      include: {
+        createdBy: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+          },
+        },
+        milestone: {
+          select: {
+            id: true,
+            name: true,
+            sequence: true,
+            percentage: true,
+            status: true,
+          },
+        },
+        media: true,
+      },
+    });
+
+    await this.auditService.log({
+      userId: authorId,
+      action: 'CONSTRUCTION_UPDATE_CREATED',
+      entityType: 'ProjectUpdate',
+      entityId: createdUpdate.id,
+      newValues: {
+        projectId,
+        title: createdUpdate.title,
+        progressPercentage: createdUpdate.progressPercentage,
+        milestoneId: createdUpdate.milestoneId,
+        mediaCount: createdUpdate.media.length,
+      },
+    });
+
+    // Notify Project Manager and Property Owner if distinct from author
+    const notificationRecipients = new Set<string>();
+    if (project.projectManagerId && project.projectManagerId !== authorId) {
+      notificationRecipients.add(project.projectManagerId);
+    }
+    if (project.property?.createdById && project.property.createdById !== authorId) {
+      notificationRecipients.add(project.property.createdById);
+    }
+
+    for (const recipientId of notificationRecipients) {
+      await this.prisma.notification.create({
+        data: {
+          userId: recipientId,
+          type: 'PROJECT_UPDATE',
+          title: `Progress Update: ${project.name}`,
+          message: `${createdUpdate.title} - Progress logged at ${Number(createdUpdate.progressPercentage).toFixed(1)}%`,
+          data: {
+            projectId,
+            updateId: createdUpdate.id,
+            progressPercentage: Number(createdUpdate.progressPercentage),
+          },
+        },
+      });
+    }
+
+    return {
+      message: 'Project field progress update recorded successfully',
+      update: {
+        id: createdUpdate.id,
+        projectId: createdUpdate.projectId,
+        title: createdUpdate.title,
+        description: createdUpdate.description,
+        progressPercentage: Number(createdUpdate.progressPercentage),
+        createdAt: createdUpdate.createdAt,
+        author: createdUpdate.createdBy,
+        milestone: createdUpdate.milestone
+          ? {
+              ...createdUpdate.milestone,
+              percentage: Number(createdUpdate.milestone.percentage),
+            }
+          : null,
+        media: createdUpdate.media.map((m) => ({
+          id: m.id,
+          type: m.type,
+          url: m.url,
+          storageKey: m.storageKey,
+        })),
+      },
+    };
+  }
+
+  /**
+   * Retrieve timeline of field progress updates for a project with pagination and milestone filter.
+   */
+  async getProjectUpdates(projectId: string, query: ProjectUpdateQueryDto) {
+    const project = await this.prisma.constructionProject.findUnique({
+      where: { id: projectId },
+      select: { id: true, name: true, projectCode: true, status: true },
+    });
+
+    if (!project) {
+      throw new NotFoundException(`Construction project with ID '${projectId}' not found`);
+    }
+
+    const page = Math.max(1, query.page || 1);
+    const limit = Math.max(1, Math.min(100, query.limit || 10));
+    const skip = (page - 1) * limit;
+
+    const where: Prisma.ProjectUpdateWhereInput = {
+      projectId,
+    };
+
+    if (query.milestoneId) {
+      where.milestoneId = query.milestoneId;
+    }
+
+    if (query.startDate || query.endDate) {
+      where.createdAt = {};
+      if (query.startDate) where.createdAt.gte = new Date(query.startDate);
+      if (query.endDate) where.createdAt.lte = new Date(query.endDate);
+    }
+
+    const [updates, total] = await Promise.all([
+      this.prisma.projectUpdate.findMany({
+        where,
+        include: {
+          createdBy: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              email: true,
+            },
+          },
+          milestone: {
+            select: {
+              id: true,
+              name: true,
+              sequence: true,
+              percentage: true,
+              status: true,
+            },
+          },
+          media: true,
+        },
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: limit,
+      }),
+      this.prisma.projectUpdate.count({ where }),
+    ]);
+
+    const latestUpdate = updates[0];
+
+    return {
+      project,
+      updates: updates.map((u) => ({
+        id: u.id,
+        title: u.title,
+        description: u.description,
+        progressPercentage: Number(u.progressPercentage),
+        createdAt: u.createdAt,
+        author: u.createdBy,
+        milestone: u.milestone
+          ? {
+              ...u.milestone,
+              percentage: Number(u.milestone.percentage),
+            }
+          : null,
+        media: u.media.map((m) => ({
+          id: m.id,
+          type: m.type,
+          url: m.url,
+          storageKey: m.storageKey,
+        })),
+      })),
+      meta: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit) || 1,
+        hasMore: page * limit < total,
+        latestProgressPercentage: latestUpdate
+          ? Number(latestUpdate.progressPercentage)
+          : null,
+      },
+    };
+  }
+
+  /**
+   * Get single progress update with detailed metadata and media attachments.
+   */
+  async getProjectUpdateById(updateId: string) {
+    const update = await this.prisma.projectUpdate.findUnique({
+      where: { id: updateId },
+      include: {
+        project: {
+          select: {
+            id: true,
+            projectCode: true,
+            name: true,
+            status: true,
+            budget: true,
+          },
+        },
+        createdBy: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+          },
+        },
+        milestone: {
+          select: {
+            id: true,
+            name: true,
+            sequence: true,
+            percentage: true,
+            status: true,
+          },
+        },
+        media: true,
+      },
+    });
+
+    if (!update) {
+      throw new NotFoundException(`Project update with ID '${updateId}' not found`);
+    }
+
+    return {
+      id: update.id,
+      project: {
+        id: update.project.id,
+        projectCode: update.project.projectCode,
+        name: update.project.name,
+        status: update.project.status,
+        budget: Number(update.project.budget),
+      },
+      title: update.title,
+      description: update.description,
+      progressPercentage: Number(update.progressPercentage),
+      createdAt: update.createdAt,
+      author: update.createdBy,
+      milestone: update.milestone
+        ? {
+            ...update.milestone,
+            percentage: Number(update.milestone.percentage),
+          }
+        : null,
+      media: update.media.map((m) => ({
+        id: m.id,
+        type: m.type,
+        url: m.url,
+        storageKey: m.storageKey,
+      })),
+    };
+  }
+
+  /**
+   * Update an existing progress update or attach additional site media.
+   */
+  async updateProjectUpdate(
+    updateId: string,
+    dto: UpdateProjectUpdateDto,
+    editorId: string,
+    userRoles: string[],
+  ) {
+    const existing = await this.prisma.projectUpdate.findUnique({
+      where: { id: updateId },
+      include: { media: true },
+    });
+
+    if (!existing) {
+      throw new NotFoundException(`Project update with ID '${updateId}' not found`);
+    }
+
+    const isAdmin = userRoles.some((r) =>
+      ['ADMIN', 'SUPER_ADMIN', 'CONSTRUCTION_MANAGER'].includes(r.toUpperCase()),
+    );
+    if (!isAdmin && existing.createdById !== editorId) {
+      throw new ForbiddenException(
+        'Only an administrator, construction manager, or the author can update this record',
+      );
+    }
+
+    if (dto.milestoneId && dto.milestoneId !== existing.milestoneId) {
+      const milestone = await this.prisma.constructionMilestone.findFirst({
+        where: { id: dto.milestoneId, projectId: existing.projectId },
+      });
+      if (!milestone) {
+        throw new BadRequestException(
+          `Milestone '${dto.milestoneId}' does not belong to this project`,
+        );
+      }
+    }
+
+    if (dto.newMedia && dto.newMedia.length > 0) {
+      await this.prisma.projectUpdateMedia.createMany({
+        data: dto.newMedia.map((m) => ({
+          projectUpdateId: updateId,
+          type: m.type || 'IMAGE',
+          url: m.url.trim(),
+          storageKey: m.storageKey.trim(),
+        })),
+      });
+    }
+
+    const updated = await this.prisma.projectUpdate.update({
+      where: { id: updateId },
+      data: {
+        title: dto.title !== undefined ? dto.title.trim() : undefined,
+        description: dto.description !== undefined ? dto.description.trim() : undefined,
+        progressPercentage:
+          dto.progressPercentage !== undefined ? dto.progressPercentage : undefined,
+        milestoneId:
+          dto.milestoneId !== undefined ? dto.milestoneId : undefined,
+      },
+      include: {
+        createdBy: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+          },
+        },
+        milestone: {
+          select: {
+            id: true,
+            name: true,
+            sequence: true,
+            percentage: true,
+            status: true,
+          },
+        },
+        media: true,
+      },
+    });
+
+    await this.auditService.log({
+      userId: editorId,
+      action: 'CONSTRUCTION_UPDATE_UPDATED',
+      entityType: 'ProjectUpdate',
+      entityId: updateId,
+      oldValues: {
+        title: existing.title,
+        progressPercentage: existing.progressPercentage,
+      },
+      newValues: {
+        title: updated.title,
+        progressPercentage: updated.progressPercentage,
+      },
+    });
+
+    return {
+      message: 'Project update amended successfully',
+      update: {
+        id: updated.id,
+        projectId: updated.projectId,
+        title: updated.title,
+        description: updated.description,
+        progressPercentage: Number(updated.progressPercentage),
+        createdAt: updated.createdAt,
+        author: updated.createdBy,
+        milestone: updated.milestone
+          ? {
+              ...updated.milestone,
+              percentage: Number(updated.milestone.percentage),
+            }
+          : null,
+        media: updated.media.map((m) => ({
+          id: m.id,
+          type: m.type,
+          url: m.url,
+          storageKey: m.storageKey,
+        })),
+      },
+    };
+  }
+
+  /**
+   * Delete a progress update and its associated media records.
+   */
+  async deleteProjectUpdate(
+    updateId: string,
+    deleterId: string,
+    userRoles: string[],
+  ) {
+    const existing = await this.prisma.projectUpdate.findUnique({
+      where: { id: updateId },
+    });
+
+    if (!existing) {
+      throw new NotFoundException(`Project update with ID '${updateId}' not found`);
+    }
+
+    const isAdmin = userRoles.some((r) =>
+      ['ADMIN', 'SUPER_ADMIN'].includes(r.toUpperCase()),
+    );
+    if (!isAdmin && existing.createdById !== deleterId) {
+      throw new ForbiddenException(
+        'Only an administrator or the author can delete this project update',
+      );
+    }
+
+    await this.prisma.projectUpdate.delete({
+      where: { id: updateId },
+    });
+
+    await this.auditService.log({
+      userId: deleterId,
+      action: 'CONSTRUCTION_UPDATE_DELETED',
+      entityType: 'ProjectUpdate',
+      entityId: updateId,
+      oldValues: {
+        projectId: existing.projectId,
+        title: existing.title,
+        progressPercentage: existing.progressPercentage,
+      },
+    });
+
+    return {
+      message: `Project update '${existing.title}' deleted successfully`,
+      id: updateId,
+      projectId: existing.projectId,
+    };
+  }
+
 }

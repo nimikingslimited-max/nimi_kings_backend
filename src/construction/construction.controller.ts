@@ -23,6 +23,9 @@ import { UpdateConstructionProjectDto } from './dto/update-construction-project.
 import { ConstructionProjectQueryDto } from './dto/construction-project-query.dto.js';
 import { CreateMilestoneDto } from './dto/create-milestone.dto.js';
 import { UpdateMilestoneDto } from './dto/update-milestone.dto.js';
+import { CreateProjectUpdateDto } from './dto/create-project-update.dto.js';
+import { UpdateProjectUpdateDto } from './dto/update-project-update.dto.js';
+import { ProjectUpdateQueryDto } from './dto/project-update-query.dto.js';
 import { Roles } from '../common/decorators/roles.decorator.js';
 import { CurrentUser } from '../common/decorators/current-user.decorator.js';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard.js';
@@ -243,4 +246,124 @@ export class ConstructionController {
   ) {
     return this.constructionService.deleteMilestone(id, adminId);
   }
+
+  // ==========================================
+  // FEATURE 3: FIELD PROGRESS UPDATES & MEDIA
+  // ==========================================
+
+  @Post('projects/:projectId/updates')
+  @Roles(
+    RoleType.ADMIN,
+    RoleType.SUPER_ADMIN,
+    RoleType.CONSTRUCTION_MANAGER,
+    RoleType.PROPERTY_MANAGER,
+    RoleType.AGENT,
+  )
+  @ApiOperation({
+    summary:
+      'Record a field progress update (% completion, engineering notes, photos/media)',
+  })
+  @ApiParam({ name: 'projectId', description: 'Construction Project UUID' })
+  @ApiResponse({
+    status: 201,
+    description: 'Field progress update logged successfully',
+  })
+  @ApiResponse({
+    status: 404,
+    description: 'Project not found',
+  })
+  createProjectUpdate(
+    @Param('projectId') projectId: string,
+    @Body() dto: CreateProjectUpdateDto,
+    @CurrentUser('id') authorId: string,
+  ) {
+    return this.constructionService.createProjectUpdate(projectId, dto, authorId);
+  }
+
+  @Get('projects/:projectId/updates')
+  @ApiOperation({
+    summary:
+      'Retrieve paginated timeline of field progress updates with attached site media',
+  })
+  @ApiParam({ name: 'projectId', description: 'Construction Project UUID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Paginated timeline of project updates',
+  })
+  getProjectUpdates(
+    @Param('projectId') projectId: string,
+    @Query() query: ProjectUpdateQueryDto,
+  ) {
+    return this.constructionService.getProjectUpdates(projectId, query);
+  }
+
+  @Get('updates/:id')
+  @ApiOperation({
+    summary:
+      'Get details of a single progress update, author info, and all media attachments',
+  })
+  @ApiParam({ name: 'id', description: 'Project Update UUID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Detailed progress update record',
+  })
+  @ApiResponse({
+    status: 404,
+    description: 'Update record not found',
+  })
+  getProjectUpdateById(@Param('id') id: string) {
+    return this.constructionService.getProjectUpdateById(id);
+  }
+
+  @Patch('updates/:id')
+  @Roles(
+    RoleType.ADMIN,
+    RoleType.SUPER_ADMIN,
+    RoleType.CONSTRUCTION_MANAGER,
+    RoleType.PROPERTY_MANAGER,
+    RoleType.AGENT,
+  )
+  @ApiOperation({
+    summary:
+      'Update a progress update title, notes, or attach additional media photos/videos',
+  })
+  @ApiParam({ name: 'id', description: 'Project Update UUID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Progress update amended successfully',
+  })
+  updateProjectUpdate(
+    @Param('id') id: string,
+    @Body() dto: UpdateProjectUpdateDto,
+    @CurrentUser() user: { id: string; roles?: string[] },
+  ) {
+    const roles = Array.isArray(user.roles) ? user.roles : [];
+    return this.constructionService.updateProjectUpdate(id, dto, user.id, roles);
+  }
+
+  @Delete('updates/:id')
+  @Roles(
+    RoleType.ADMIN,
+    RoleType.SUPER_ADMIN,
+    RoleType.CONSTRUCTION_MANAGER,
+    RoleType.PROPERTY_MANAGER,
+    RoleType.AGENT,
+  )
+  @ApiOperation({
+    summary:
+      'Delete a field progress update and associated media records',
+  })
+  @ApiParam({ name: 'id', description: 'Project Update UUID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Progress update deleted successfully',
+  })
+  deleteProjectUpdate(
+    @Param('id') id: string,
+    @CurrentUser() user: { id: string; roles?: string[] },
+  ) {
+    const roles = Array.isArray(user.roles) ? user.roles : [];
+    return this.constructionService.deleteProjectUpdate(id, user.id, roles);
+  }
+
 }
