@@ -18,6 +18,7 @@ import { ProjectUpdateQueryDto } from './dto/project-update-query.dto.js';
 import { CreateProjectExpenseDto } from './dto/create-project-expense.dto.js';
 import { UpdateProjectExpenseDto } from './dto/update-project-expense.dto.js';
 import { ProjectExpenseQueryDto } from './dto/project-expense-query.dto.js';
+import { PublicConstructionProjectQueryDto } from './dto/public-construction-project-query.dto.js';
 
 @Injectable()
 export class ConstructionService {
@@ -1852,6 +1853,524 @@ export class ConstructionService {
       message: 'Expense record deleted successfully',
       id,
       projectId: existing.projectId,
+    };
+  }
+
+
+  // ==========================================
+  // FEATURE 5: CUSTOMER PORTAL & OFF-PLAN
+  // ==========================================
+
+  /**
+   * Public discovery endpoint for prospective off-plan buyers and investors.
+   * Internal budgets and contractor expense records are excluded for privacy.
+   */
+  async getPublicProjects(query: PublicConstructionProjectQueryDto) {
+    const page = Math.max(1, query.page || 1);
+    const limit = Math.max(1, Math.min(50, query.limit || 10));
+    const skip = (page - 1) * limit;
+
+    const where: Prisma.ConstructionProjectWhereInput = {};
+
+    if (query.status) {
+      where.status = query.status;
+    }
+
+    if (query.city || query.state) {
+      where.property = {
+        ...(query.city
+          ? { city: { contains: query.city.trim(), mode: 'insensitive' } }
+          : {}),
+        ...(query.state
+          ? { state: { contains: query.state.trim(), mode: 'insensitive' } }
+          : {}),
+      };
+    }
+
+    if (query.search) {
+      const term = query.search.trim();
+      where.OR = [
+        { name: { contains: term, mode: 'insensitive' } },
+        { projectCode: { contains: term, mode: 'insensitive' } },
+        { description: { contains: term, mode: 'insensitive' } },
+        { property: { title: { contains: term, mode: 'insensitive' } } },
+      ];
+    }
+
+    const [projects, total] = await Promise.all([
+      this.prisma.constructionProject.findMany({
+        where,
+        include: {
+          property: {
+            select: {
+              id: true,
+              propertyCode: true,
+              title: true,
+              propertyType: true,
+              address: true,
+              city: true,
+              state: true,
+              media: {
+                where: { isPrimary: true },
+                take: 1,
+                select: { url: true },
+              },
+            },
+          },
+          milestones: {
+            select: {
+              id: true,
+              name: true,
+              sequence: true,
+              percentage: true,
+              status: true,
+            },
+            orderBy: { sequence: 'asc' },
+          },
+          updates: {
+            orderBy: { createdAt: 'desc' },
+            take: 1,
+            select: {
+              id: true,
+              title: true,
+              progressPercentage: true,
+              createdAt: true,
+            },
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: limit,
+      }),
+      this.prisma.constructionProject.count({ where }),
+    ]);
+
+    const formattedProjects = projects.map((p) => {
+      const latestUpdate = p.updates[0];
+      let overallProgress = 0;
+      if (latestUpdate) {
+        overallProgress = Number(latestUpdate.progressPercentage);
+      } else {
+        const completed = p.milestones.filter((m) => m.status === 'COMPLETED');
+        overallProgress = completed.reduce((sum, m) => sum + Number(m.percentage), 0);
+      }
+
+      const completedMilestones = p.milestones.filter(
+        (m) => m.status === 'COMPLETED',
+      ).length;
+
+      return {
+        id: p.id,
+        projectCode: p.projectCode,
+        name: p.name,
+        description: p.description,
+        status: p.status,
+        startDate: p.startDate,
+        expectedEndDate: p.expectedEndDate,
+        progress: {
+          overallPercentage: Number(overallProgress.toFixed(2)),
+          completedMilestones,
+          totalMilestones: p.milestones.length,
+        },
+        property: p.property
+          ? {
+              id: p.property.id,
+              propertyCode: p.property.propertyCode,
+              title: p.property.title,
+              propertyType: p.property.propertyType,
+              location: `${p.property.city}, ${p.property.state}`,
+              featuredImage: p.property.media[0]?.url || null,
+            }
+          : null,
+        roadmap: p.milestones.map((m) => ({
+          id: m.id,
+          name: m.name,
+          sequence: m.sequence,
+          percentage: Number(m.percentage),
+          status: m.status,
+        })),
+        latestUpdate: latestUpdate
+          ? {
+              title: latestUpdate.title,
+              progressPercentage: Number(latestUpdate.progressPercentage),
+              date: latestUpdate.createdAt,
+            }
+          : null,
+      };
+    });
+
+    return {
+      projects: formattedProjects,
+      meta: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit) || 1,
+        hasMore: page * limit < total,
+      },
+    };
+  }
+
+  /**
+   * Public detailed showcase for a project by ID or projectCode.
+   */
+  async getPublicProjectByCodeOrId(codeOrId: string) {
+    const project = await this.prisma.constructionProject.findFirst({
+      where: {
+        OR: [{ id: codeOrId }, { projectCode: codeOrId.toUpperCase() }],
+      },
+      include: {
+        property: {
+          select: {
+            id: true,
+            propertyCode: true,
+            title: true,
+            description: true,
+            propertyType: true,
+            address: true,
+            city: true,
+            state: true,
+            media: {
+              select: { id: true, url: true, type: true, isPrimary: true },
+            },
+          },
+        },
+        milestones: {
+          orderBy: { sequence: 'asc' },
+          select: {
+            id: true,
+            name: true,
+            description: true,
+            sequence: true,
+            percentage: true,
+            status: true,
+            completedAt: true,
+          },
+        },
+        updates: {
+          orderBy: { createdAt: 'desc' },
+          take: 10,
+          select: {
+            id: true,
+            title: true,
+            description: true,
+            progressPercentage: true,
+            createdAt: true,
+            media: {
+              select: { id: true, url: true, type: true },
+            },
+          },
+        },
+      },
+    });
+
+    if (!project) {
+      throw new NotFoundException(
+        `Construction project '${codeOrId}' not found`,
+      );
+    }
+
+    const latestUpdate = project.updates[0];
+    let overallProgress = 0;
+    if (latestUpdate) {
+      overallProgress = Number(latestUpdate.progressPercentage);
+    } else {
+      const completed = project.milestones.filter((m) => m.status === 'COMPLETED');
+      overallProgress = completed.reduce((sum, m) => sum + Number(m.percentage), 0);
+    }
+
+    const completedMilestones = project.milestones.filter(
+      (m) => m.status === 'COMPLETED',
+    ).length;
+
+    return {
+      project: {
+        id: project.id,
+        projectCode: project.projectCode,
+        name: project.name,
+        description: project.description,
+        status: project.status,
+        startDate: project.startDate,
+        expectedEndDate: project.expectedEndDate,
+        progress: {
+          overallPercentage: Number(overallProgress.toFixed(2)),
+          completedMilestones,
+          totalMilestones: project.milestones.length,
+        },
+      },
+      property: project.property,
+      roadmap: project.milestones.map((m) => ({
+        id: m.id,
+        name: m.name,
+        description: m.description,
+        sequence: m.sequence,
+        percentage: Number(m.percentage),
+        status: m.status,
+        completedAt: m.completedAt,
+      })),
+      recentFieldUpdates: project.updates.map((u) => ({
+        id: u.id,
+        title: u.title,
+        description: u.description,
+        progressPercentage: Number(u.progressPercentage),
+        createdAt: u.createdAt,
+        media: u.media,
+      })),
+    };
+  }
+
+  /**
+   * Customer portal: retrieve all construction projects tied to the authenticated customer.
+   */
+  async getCustomerProjects(userId: string) {
+    // 1. Check transactions where customer purchased/invested in a property
+    const userTransactions = await this.prisma.transaction.findMany({
+      where: { customerId: userId },
+      select: { propertyId: true },
+    });
+    const transactionPropertyIds = userTransactions
+      .map((t) => t.propertyId)
+      .filter((id): id is string => Boolean(id));
+
+    // 2. Fetch matching projects
+    const projects = await this.prisma.constructionProject.findMany({
+      where: {
+        OR: [
+          { property: { createdById: userId } },
+          { propertyId: { in: transactionPropertyIds } },
+        ],
+      },
+      include: {
+        property: {
+          select: {
+            id: true,
+            propertyCode: true,
+            title: true,
+            propertyType: true,
+            address: true,
+            city: true,
+            state: true,
+            media: { take: 1, select: { url: true } },
+          },
+        },
+        projectManager: {
+          select: { id: true, firstName: true, lastName: true, email: true },
+        },
+        milestones: {
+          orderBy: { sequence: 'asc' },
+          select: {
+            id: true,
+            name: true,
+            sequence: true,
+            percentage: true,
+            status: true,
+          },
+        },
+        updates: {
+          orderBy: { createdAt: 'desc' },
+          take: 3,
+          include: {
+            media: {
+              select: { id: true, url: true, type: true },
+            },
+          },
+        },
+      },
+      orderBy: { updatedAt: 'desc' },
+    });
+
+    const formatted = projects.map((p) => {
+      const latestUpdate = p.updates[0];
+      let overallProgress = 0;
+      if (latestUpdate) {
+        overallProgress = Number(latestUpdate.progressPercentage);
+      } else {
+        const completed = p.milestones.filter((m) => m.status === 'COMPLETED');
+        overallProgress = completed.reduce((sum, m) => sum + Number(m.percentage), 0);
+      }
+
+      const completedMilestones = p.milestones.filter(
+        (m) => m.status === 'COMPLETED',
+      ).length;
+
+      return {
+        id: p.id,
+        projectCode: p.projectCode,
+        name: p.name,
+        status: p.status,
+        startDate: p.startDate,
+        expectedEndDate: p.expectedEndDate,
+        progress: {
+          overallPercentage: Number(overallProgress.toFixed(2)),
+          completedMilestones,
+          totalMilestones: p.milestones.length,
+        },
+        property: p.property
+          ? {
+              id: p.property.id,
+              propertyCode: p.property.propertyCode,
+              title: p.property.title,
+              location: `${p.property.city}, ${p.property.state}`,
+              image: p.property.media[0]?.url || null,
+            }
+          : null,
+        projectManager: p.projectManager,
+        milestonesProgress: p.milestones.map((m) => ({
+          name: m.name,
+          sequence: m.sequence,
+          percentage: Number(m.percentage),
+          status: m.status,
+        })),
+        latestUpdate: latestUpdate
+          ? {
+              title: latestUpdate.title,
+              description: latestUpdate.description,
+              progressPercentage: Number(latestUpdate.progressPercentage),
+              createdAt: latestUpdate.createdAt,
+              mediaCount: latestUpdate.media.length,
+              photos: latestUpdate.media.map((m) => m.url),
+            }
+          : null,
+      };
+    });
+
+    const averageProgress =
+      formatted.length > 0
+        ? formatted.reduce((acc, curr) => acc + curr.progress.overallPercentage, 0) /
+          formatted.length
+        : 0;
+
+    return {
+      summary: {
+        totalTrackedProjects: formatted.length,
+        averageProgressPercentage: Number(averageProgress.toFixed(2)),
+      },
+      projects: formatted,
+    };
+  }
+
+  /**
+   * Detailed customer tracking dossier for a specific project.
+   */
+  async getCustomerProjectDetails(
+    projectId: string,
+    userId: string,
+    userRoles: string[],
+  ) {
+    const project = await this.prisma.constructionProject.findUnique({
+      where: { id: projectId },
+      include: {
+        property: {
+          include: {
+            media: true,
+          },
+        },
+        projectManager: {
+          select: { id: true, firstName: true, lastName: true, email: true },
+        },
+        milestones: {
+          orderBy: { sequence: 'asc' },
+        },
+        updates: {
+          orderBy: { createdAt: 'desc' },
+          include: {
+            media: true,
+          },
+        },
+      },
+    });
+
+    if (!project) {
+      throw new NotFoundException(`Construction project with ID '${projectId}' not found`);
+    }
+
+    // Authorization check: Admins/Agents can view; customers must own property or have transaction
+    const isStaff = userRoles.some((r) =>
+      ['ADMIN', 'SUPER_ADMIN', 'AGENT', 'CONSTRUCTION_MANAGER', 'PROPERTY_MANAGER'].includes(
+        r.toUpperCase(),
+      ),
+    );
+
+    if (!isStaff) {
+      const isOwner = project.property?.createdById === userId;
+      let hasTransaction = false;
+      if (project.propertyId) {
+        const tx = await this.prisma.transaction.findFirst({
+          where: { customerId: userId, propertyId: project.propertyId },
+        });
+        hasTransaction = Boolean(tx);
+      }
+
+      if (!isOwner && !hasTransaction) {
+        throw new ForbiddenException(
+          'You do not have authorization to track this off-plan construction project',
+        );
+      }
+    }
+
+    const latestUpdate = project.updates[0];
+    let overallProgress = 0;
+    if (latestUpdate) {
+      overallProgress = Number(latestUpdate.progressPercentage);
+    } else {
+      const completed = project.milestones.filter((m) => m.status === 'COMPLETED');
+      overallProgress = completed.reduce((sum, m) => sum + Number(m.percentage), 0);
+    }
+
+    return {
+      project: {
+        id: project.id,
+        projectCode: project.projectCode,
+        name: project.name,
+        description: project.description,
+        status: project.status,
+        startDate: project.startDate,
+        expectedEndDate: project.expectedEndDate,
+        progress: {
+          overallPercentage: Number(overallProgress.toFixed(2)),
+          completedMilestones: project.milestones.filter((m) => m.status === 'COMPLETED').length,
+          totalMilestones: project.milestones.length,
+        },
+      },
+      projectManager: project.projectManager,
+      property: project.property
+        ? {
+            id: project.property.id,
+            propertyCode: project.property.propertyCode,
+            title: project.property.title,
+            propertyType: project.property.propertyType,
+            address: project.property.address,
+            city: project.property.city,
+            state: project.property.state,
+            media: project.property.media.map((m) => ({
+              id: m.id,
+              url: m.url,
+              type: m.type,
+              isPrimary: m.isPrimary,
+            })),
+          }
+        : null,
+      milestones: project.milestones.map((m) => ({
+        id: m.id,
+        name: m.name,
+        description: m.description,
+        sequence: m.sequence,
+        percentage: Number(m.percentage),
+        status: m.status,
+        completedAt: m.completedAt,
+      })),
+      fieldUpdates: project.updates.map((u) => ({
+        id: u.id,
+        title: u.title,
+        description: u.description,
+        progressPercentage: Number(u.progressPercentage),
+        createdAt: u.createdAt,
+        media: u.media.map((m) => ({
+          id: m.id,
+          type: m.type,
+          url: m.url,
+        })),
+      })),
     };
   }
 

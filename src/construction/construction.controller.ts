@@ -29,6 +29,8 @@ import { ProjectUpdateQueryDto } from './dto/project-update-query.dto.js';
 import { CreateProjectExpenseDto } from './dto/create-project-expense.dto.js';
 import { UpdateProjectExpenseDto } from './dto/update-project-expense.dto.js';
 import { ProjectExpenseQueryDto } from './dto/project-expense-query.dto.js';
+import { PublicConstructionProjectQueryDto } from './dto/public-construction-project-query.dto.js';
+import { Public } from '../common/decorators/public.decorator.js';
 import { Roles } from '../common/decorators/roles.decorator.js';
 import { CurrentUser } from '../common/decorators/current-user.decorator.js';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard.js';
@@ -511,6 +513,79 @@ export class ConstructionController {
   ) {
     const roles = Array.isArray(user.roles) ? user.roles : [];
     return this.constructionService.deleteExpense(id, user.id, roles);
+  }
+
+
+  // ==========================================
+  // FEATURE 5: CUSTOMER PORTAL & OFF-PLAN
+  // ==========================================
+
+  @Public()
+  @Get('public/projects')
+  @ApiOperation({
+    summary:
+      'Public discovery: browse active construction developments, estates, and off-plan properties (no auth required)',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Public catalog of construction developments and milestones roadmap',
+  })
+  getPublicProjects(@Query() query: PublicConstructionProjectQueryDto) {
+    return this.constructionService.getPublicProjects(query);
+  }
+
+  @Public()
+  @Get('public/projects/:codeOrId')
+  @ApiOperation({
+    summary:
+      'Public showcase: get detailed public view of a construction project by code or UUID (no auth required)',
+  })
+  @ApiParam({ name: 'codeOrId', description: 'Project Code (e.g. NK-CP-0L80T) or UUID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Detailed public project profile with roadmap and recent photos',
+  })
+  @ApiResponse({
+    status: 404,
+    description: 'Project not found',
+  })
+  getPublicProjectByCodeOrId(@Param('codeOrId') codeOrId: string) {
+    return this.constructionService.getPublicProjectByCodeOrId(codeOrId);
+  }
+
+  @Get('my-projects')
+  @ApiOperation({
+    summary:
+      'Customer Portal: retrieve all off-plan construction projects tied to the authenticated user',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Customer off-plan construction portfolio and progress tracker',
+  })
+  getMyProjects(@CurrentUser('id') customerId: string) {
+    return this.constructionService.getCustomerProjects(customerId);
+  }
+
+  @Get('my-projects/:projectId')
+  @ApiOperation({
+    summary:
+      'Customer Portal: get deep dive tracking dossier for a specific construction project the user owns/invested in',
+  })
+  @ApiParam({ name: 'projectId', description: 'Construction Project UUID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Personalized customer tracking dossier',
+  })
+  @ApiResponse({
+    status: 403,
+    description: 'Forbidden - not authorized to track this project',
+  })
+  getMyProjectDetails(
+    @Param('projectId') projectId: string,
+    @CurrentUser() user: { id: string; roles?: string[] },
+  ) {
+    const roles = Array.isArray(user.roles) ? user.roles : [];
+    return this.constructionService.getCustomerProjectDetails(projectId, user.id, roles);
   }
 
 }
