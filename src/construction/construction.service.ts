@@ -9,6 +9,8 @@ import { AuditService } from '../common/audit/audit.service.js';
 import { CreateConstructionProjectDto } from './dto/create-construction-project.dto.js';
 import { UpdateConstructionProjectDto } from './dto/update-construction-project.dto.js';
 import { ConstructionProjectQueryDto } from './dto/construction-project-query.dto.js';
+import { CreateMilestoneDto } from './dto/create-milestone.dto.js';
+import { UpdateMilestoneDto } from './dto/update-milestone.dto.js';
 
 @Injectable()
 export class ConstructionService {
@@ -591,5 +593,310 @@ export class ConstructionService {
         projectCode: project.projectCode,
       };
     }
+  }
+
+  // ==========================================
+  // MILESTONES & WORK BREAKDOWN STRUCTURE (WBS)
+  // ==========================================
+
+  /**
+   * Add a milestone / work breakdown phase to a project with sequence and completion percentage weight.
+   */
+  async createMilestone(projectId: string, dto: CreateMilestoneDto, creatorId: string) {
+    const project = await this.prisma.constructionProject.findFirst({
+      where: {
+        OR: [{ id: projectId }, { projectCode: projectId }],
+      },
+      include: {
+        milestones: {
+          select: { percentage: true, sequence: true },
+        },
+      },
+    });
+
+    if (!project) {
+      throw new NotFoundException(`Construction project '${projectId}' not found`);
+    }
+
+    const currentTotalWeight = project.milestones.reduce(
+      (sum, m) => sum + Number(m.percentage),
+      0,
+    );
+    const newTotalWeight = currentTotalWeight + dto.percentage;
+
+    if (newTotalWeight > 100.01) {
+      throw new BadRequestException(
+        `Total milestone weight cannot exceed 100.00%. Current allocated weight is ${currentTotalWeight.toFixed(2)}%, and adding ${dto.percentage.toFixed(2)}% would equal ${newTotalWeight.toFixed(2)}%.`,
+      );
+    }
+
+    const sequence = dto.sequence || project.milestones.length + 1;
+
+    const milestone = await this.prisma.constructionMilestone.create({
+      data: {
+        projectId: project.id,
+        name: dto.name.trim(),
+        description: dto.description?.trim() || null,
+        sequence,
+        percentage: dto.percentage,
+        status: dto.status || 'PLANNED',
+        startDate: dto.startDate ? new Date(dto.startDate) : null,
+        expectedEndDate: dto.expectedEndDate ? new Date(dto.expectedEndDate) : null,
+      },
+    });
+
+    await this.auditService.log({
+      userId: creatorId,
+      action: 'CONSTRUCTION_MILESTONE_CREATED',
+      entityType: 'ConstructionMilestone',
+      entityId: milestone.id,
+      newValues: {
+        projectId: project.id,
+        projectCode: project.projectCode,
+        name: milestone.name,
+        percentage: milestone.percentage,
+        sequence: milestone.sequence,
+      },
+    });
+
+    return {
+      message: 'Milestone created successfully',
+      milestone: {
+        ...milestone,
+        percentage: Number(milestone.percentage),
+      },
+      projectWeightAllocation: {
+        allocatedWeightPercentage: Number(newTotalWeight.toFixed(2)),
+        remainingWeightPercentage: Number(Math.max(0, 100 - newTotalWeight).toFixed(2)),
+      },
+    };
+  }
+
+  /**
+   * List all milestones for a project in sequential order with status and weight metrics.
+   */
+  async getProjectMilestones(projectId: string) {
+    const project = await this.prisma.constructionProject.findFirst({
+      where: {
+        OR: [{ id: projectId }, { projectCode: projectId }],
+      },
+    });
+
+    if (!project) {
+      throw new NotFoundException(`Construction project '${projectId}' not found`);
+    }
+
+    const milestones = await this.prisma.constructionMilestone.findMany({
+      where: { projectId: project.id },
+      orderBy: { sequence: 'asc' },
+      include: {
+        _count: {
+          select: { updates: true },
+        },
+      },
+    });
+
+    const totalWeight = milestones.reduce((sum, m) => sum + Number(m.percentage), 0);
+    const completedWeight = milestones
+      .filter((m) => m.status === 'COMPLETED')
+      .reduce((sum, m) => sum + Number(m.percentage), 0);
+
+    return {
+      projectId: project.id,
+      projectCode: project.projectCode,
+      projectName: project.name,
+      summary: {
+        totalMilestones: milestones.length,
+        completedMilestones: milestones.filter((m) => m.status === 'COMPLETED').length,
+        inProgressMilestones: milestones.filter((m) => m.status === 'IN_PROGRESS').length,
+        allocatedWeightPercentage: Number(totalWeight.toFixed(2)),
+        completedPercentage: Number(completedWeight.toFixed(2)),
+      },
+      milestones: milestones.map((m) => ({
+        id: m.id,
+        name: m.name,
+        description: m.description,
+        sequence: m.sequence,
+        percentage: Number(m.percentage),
+        status: m.status,
+        startDate: m.startDate,
+        expectedEndDate: m.expectedEndDate,
+        completedAt: m.completedAt,
+        updatesCount: m._count.updates,
+        createdAt: m.createdAt,
+        updatedAt: m.updatedAt,
+      })),
+    };
+  }
+
+  /**
+   * Get single milestone details with project association and related updates.
+   */
+  async getMilestoneById(id: string) {
+    const milestone = await this.prisma.constructionMilestone.findUnique({
+      where: { id },
+      include: {
+        project: {
+          select: {
+            id: true,
+            projectCode: true,
+            name: true,
+            status: true,
+          },
+        },
+        updates: {
+          orderBy: { createdAt: 'desc' },
+          take: 5,
+          include: {
+            createdBy: {
+              select: { id: true, firstName: true, lastName: true },
+            },
+            media: true,
+          },
+        },
+      },
+    });
+
+    if (!milestone) {
+      throw new NotFoundException(`Milestone with ID '${id}' not found`);
+    }
+
+    return {
+      milestone: {
+        ...milestone,
+        percentage: Number(milestone.percentage),
+      },
+    };
+  }
+
+  /**
+   * Update milestone properties, sequence, weight, or lifecycle status.
+   */
+  async updateMilestone(id: string, dto: UpdateMilestoneDto, editorId: string) {
+    const milestone = await this.prisma.constructionMilestone.findUnique({
+      where: { id },
+      include: {
+        project: {
+          include: {
+            milestones: {
+              select: { id: true, percentage: true },
+            },
+          },
+        },
+      },
+    });
+
+    if (!milestone) {
+      throw new NotFoundException(`Milestone with ID '${id}' not found`);
+    }
+
+    if (dto.percentage !== undefined) {
+      const otherMilestonesWeight = milestone.project.milestones
+        .filter((m) => m.id !== id)
+        .reduce((sum, m) => sum + Number(m.percentage), 0);
+      const newTotal = otherMilestonesWeight + dto.percentage;
+
+      if (newTotal > 100.01) {
+        throw new BadRequestException(
+          `Updated percentage of ${dto.percentage}% would bring total project milestone weight to ${newTotal.toFixed(2)}%, exceeding 100.00%.`,
+        );
+      }
+    }
+
+    const isMarkingCompleted = dto.status === 'COMPLETED' && milestone.status !== 'COMPLETED';
+    const isUnmarkingCompleted = dto.status && dto.status !== 'COMPLETED' && milestone.status === 'COMPLETED';
+
+    const completedAt = dto.completedAt
+      ? new Date(dto.completedAt)
+      : isMarkingCompleted
+        ? new Date()
+        : isUnmarkingCompleted
+          ? null
+          : milestone.completedAt;
+
+    const oldValues = {
+      name: milestone.name,
+      status: milestone.status,
+      percentage: milestone.percentage,
+      sequence: milestone.sequence,
+      completedAt: milestone.completedAt,
+    };
+
+    const updated = await this.prisma.constructionMilestone.update({
+      where: { id },
+      data: {
+        name: dto.name !== undefined ? dto.name.trim() : undefined,
+        description: dto.description !== undefined ? dto.description.trim() : undefined,
+        sequence: dto.sequence !== undefined ? dto.sequence : undefined,
+        percentage: dto.percentage !== undefined ? dto.percentage : undefined,
+        status: dto.status !== undefined ? dto.status : undefined,
+        startDate: dto.startDate !== undefined ? new Date(dto.startDate) : undefined,
+        expectedEndDate:
+          dto.expectedEndDate !== undefined ? new Date(dto.expectedEndDate) : undefined,
+        completedAt,
+      },
+    });
+
+    await this.auditService.log({
+      userId: editorId,
+      action: 'CONSTRUCTION_MILESTONE_UPDATED',
+      entityType: 'ConstructionMilestone',
+      entityId: id,
+      oldValues,
+      newValues: {
+        name: updated.name,
+        status: updated.status,
+        percentage: updated.percentage,
+        completedAt: updated.completedAt,
+      },
+    });
+
+    return {
+      message: 'Milestone updated successfully',
+      milestone: {
+        ...updated,
+        percentage: Number(updated.percentage),
+      },
+    };
+  }
+
+  /**
+   * Delete a milestone from a project.
+   */
+  async deleteMilestone(id: string, adminId: string) {
+    const milestone = await this.prisma.constructionMilestone.findUnique({
+      where: { id },
+      include: {
+        project: {
+          select: { id: true, projectCode: true },
+        },
+      },
+    });
+
+    if (!milestone) {
+      throw new NotFoundException(`Milestone with ID '${id}' not found`);
+    }
+
+    await this.prisma.constructionMilestone.delete({
+      where: { id },
+    });
+
+    await this.auditService.log({
+      userId: adminId,
+      action: 'CONSTRUCTION_MILESTONE_DELETED',
+      entityType: 'ConstructionMilestone',
+      entityId: id,
+      oldValues: {
+        projectId: milestone.projectId,
+        name: milestone.name,
+        percentage: milestone.percentage,
+      },
+    });
+
+    return {
+      message: `Milestone '${milestone.name}' deleted successfully`,
+      id,
+      projectId: milestone.projectId,
+    };
   }
 }

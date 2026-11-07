@@ -21,6 +21,8 @@ import { ConstructionService } from './construction.service.js';
 import { CreateConstructionProjectDto } from './dto/create-construction-project.dto.js';
 import { UpdateConstructionProjectDto } from './dto/update-construction-project.dto.js';
 import { ConstructionProjectQueryDto } from './dto/construction-project-query.dto.js';
+import { CreateMilestoneDto } from './dto/create-milestone.dto.js';
+import { UpdateMilestoneDto } from './dto/update-milestone.dto.js';
 import { Roles } from '../common/decorators/roles.decorator.js';
 import { CurrentUser } from '../common/decorators/current-user.decorator.js';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard.js';
@@ -132,5 +134,113 @@ export class ConstructionController {
     @CurrentUser('id') adminId: string,
   ) {
     return this.constructionService.deleteProject(id, adminId);
+  }
+
+  // ==========================================
+  // MILESTONES & WORK BREAKDOWN STRUCTURE (WBS)
+  // ==========================================
+
+  @Post('projects/:projectId/milestones')
+  @Roles(
+    RoleType.ADMIN,
+    RoleType.SUPER_ADMIN,
+    RoleType.CONSTRUCTION_MANAGER,
+    RoleType.PROPERTY_MANAGER,
+  )
+  @ApiOperation({
+    summary:
+      'Add a new milestone / construction phase to a project (percentage weight, sequence, dates)',
+  })
+  @ApiParam({ name: 'projectId', description: 'Project UUID or projectCode' })
+  @ApiResponse({
+    status: 201,
+    description: 'Milestone created successfully',
+  })
+  @ApiResponse({
+    status: 400,
+    description: 'Milestone weight exceeds remaining project allocation',
+  })
+  createMilestone(
+    @Param('projectId') projectId: string,
+    @Body() dto: CreateMilestoneDto,
+    @CurrentUser('id') creatorId: string,
+  ) {
+    return this.constructionService.createMilestone(projectId, dto, creatorId);
+  }
+
+  @Get('projects/:projectId/milestones')
+  @ApiOperation({
+    summary:
+      'List all milestones for a project in sequential order with status and completion weights',
+  })
+  @ApiParam({ name: 'projectId', description: 'Project UUID or projectCode' })
+  @ApiResponse({
+    status: 200,
+    description: 'List of project milestones',
+  })
+  getProjectMilestones(@Param('projectId') projectId: string) {
+    return this.constructionService.getProjectMilestones(projectId);
+  }
+
+  @Get('milestones/:id')
+  @ApiOperation({
+    summary: 'Get single milestone details by ID',
+  })
+  @ApiParam({ name: 'id', description: 'Milestone UUID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Milestone details',
+  })
+  @ApiResponse({
+    status: 404,
+    description: 'Milestone not found',
+  })
+  getMilestoneById(@Param('id') id: string) {
+    return this.constructionService.getMilestoneById(id);
+  }
+
+  @Patch('milestones/:id')
+  @Roles(
+    RoleType.ADMIN,
+    RoleType.SUPER_ADMIN,
+    RoleType.CONSTRUCTION_MANAGER,
+    RoleType.PROPERTY_MANAGER,
+  )
+  @ApiOperation({
+    summary:
+      'Update milestone status, name, sequence, or percentage weight (auto-sets completedAt when marked COMPLETED)',
+  })
+  @ApiParam({ name: 'id', description: 'Milestone UUID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Milestone updated successfully',
+  })
+  updateMilestone(
+    @Param('id') id: string,
+    @Body() dto: UpdateMilestoneDto,
+    @CurrentUser('id') editorId: string,
+  ) {
+    return this.constructionService.updateMilestone(id, dto, editorId);
+  }
+
+  @Delete('milestones/:id')
+  @Roles(
+    RoleType.ADMIN,
+    RoleType.SUPER_ADMIN,
+    RoleType.CONSTRUCTION_MANAGER,
+  )
+  @ApiOperation({
+    summary: 'Delete a milestone from a project',
+  })
+  @ApiParam({ name: 'id', description: 'Milestone UUID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Milestone deleted successfully',
+  })
+  deleteMilestone(
+    @Param('id') id: string,
+    @CurrentUser('id') adminId: string,
+  ) {
+    return this.constructionService.deleteMilestone(id, adminId);
   }
 }
