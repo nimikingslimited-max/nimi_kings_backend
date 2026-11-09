@@ -27,6 +27,9 @@ import { CropCycleQueryDto } from './dto/crop-cycle-query.dto.js';
 import { CreateCropFieldLogDto } from './dto/create-crop-field-log.dto.js';
 import { UpdateCropFieldLogDto } from './dto/update-crop-field-log.dto.js';
 import { CropFieldLogQueryDto } from './dto/crop-field-log-query.dto.js';
+import { CreateHarvestRecordDto } from './dto/create-harvest-record.dto.js';
+import { UpdateHarvestRecordDto } from './dto/update-harvest-record.dto.js';
+import { HarvestQueryDto } from './dto/harvest-query.dto.js';
 import { Roles } from '../common/decorators/roles.decorator.js';
 import { CurrentUser } from '../common/decorators/current-user.decorator.js';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard.js';
@@ -364,6 +367,139 @@ export class AgricultureController {
   ) {
     const roles = Array.isArray(user.roles) ? user.roles : [];
     return this.agricultureService.deleteFieldLog(id, user.id, roles);
+  }
+
+
+  // ==========================================
+  // FEATURE 4: HARVEST RECORDS & YIELD TRACKING
+  // ==========================================
+
+  @Post('crop-cycles/:cycleId/harvests')
+  @Roles(
+    RoleType.ADMIN,
+    RoleType.SUPER_ADMIN,
+    RoleType.PROPERTY_MANAGER,
+    RoleType.AGENT,
+  )
+  @ApiOperation({
+    summary:
+      'Record a crop harvest batch (yield quantity, quality grade, storage location, estimated value)',
+  })
+  @ApiParam({ name: 'cycleId', description: 'Crop Cycle UUID' })
+  @ApiResponse({
+    status: 201,
+    description: 'Harvest batch recorded successfully with updated cycle yield analytics',
+  })
+  recordHarvest(
+    @Param('cycleId') cycleId: string,
+    @Body() dto: CreateHarvestRecordDto,
+    @CurrentUser('id') recorderId: string,
+  ) {
+    return this.agricultureService.recordHarvest(cycleId, dto, recorderId);
+  }
+
+  @Get('crop-cycles/:cycleId/harvests')
+  @ApiOperation({
+    summary:
+      'Retrieve paginated list of harvest batches and cumulative yield for a specific crop cycle',
+  })
+  @ApiParam({ name: 'cycleId', description: 'Crop Cycle UUID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Paginated harvest batches for crop cycle',
+  })
+  getCycleHarvests(
+    @Param('cycleId') cycleId: string,
+    @Query() query: HarvestQueryDto,
+  ) {
+    return this.agricultureService.getCycleHarvests(cycleId, query);
+  }
+
+  @Get('farms/:farmId/harvests')
+  @Roles(
+    RoleType.ADMIN,
+    RoleType.SUPER_ADMIN,
+    RoleType.PROPERTY_MANAGER,
+    RoleType.AGENT,
+  )
+  @ApiOperation({
+    summary:
+      'Retrieve farm-wide harvest ledger across all crop cycles with quality breakdown',
+  })
+  @ApiParam({ name: 'farmId', description: 'Farm Estate UUID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Farm-wide harvest ledger',
+  })
+  getFarmHarvests(
+    @Param('farmId') farmId: string,
+    @Query() query: HarvestQueryDto,
+  ) {
+    return this.agricultureService.getFarmHarvests(farmId, query);
+  }
+
+  @Get('harvests/:id')
+  @ApiOperation({
+    summary: 'Get details of a single harvest batch by UUID',
+  })
+  @ApiParam({ name: 'id', description: 'Harvest Record UUID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Detailed harvest record',
+  })
+  @ApiResponse({
+    status: 404,
+    description: 'Harvest record not found',
+  })
+  getHarvestById(@Param('id') id: string) {
+    return this.agricultureService.getHarvestById(id);
+  }
+
+  @Patch('harvests/:id')
+  @Roles(
+    RoleType.ADMIN,
+    RoleType.SUPER_ADMIN,
+    RoleType.PROPERTY_MANAGER,
+    RoleType.AGENT,
+  )
+  @ApiOperation({
+    summary: 'Amend a harvest record (quantity, grade, storage location, notes)',
+  })
+  @ApiParam({ name: 'id', description: 'Harvest Record UUID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Harvest record amended successfully',
+  })
+  updateHarvest(
+    @Param('id') id: string,
+    @Body() dto: UpdateHarvestRecordDto,
+    @CurrentUser() user: { id: string; roles?: string[] },
+  ) {
+    const roles = Array.isArray(user.roles) ? user.roles : [];
+    return this.agricultureService.updateHarvest(id, dto, user.id, roles);
+  }
+
+  @Delete('harvests/:id')
+  @Roles(
+    RoleType.ADMIN,
+    RoleType.SUPER_ADMIN,
+    RoleType.PROPERTY_MANAGER,
+    RoleType.AGENT,
+  )
+  @ApiOperation({
+    summary: 'Delete a harvest record from the ledger',
+  })
+  @ApiParam({ name: 'id', description: 'Harvest Record UUID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Harvest record deleted successfully',
+  })
+  deleteHarvest(
+    @Param('id') id: string,
+    @CurrentUser() user: { id: string; roles?: string[] },
+  ) {
+    const roles = Array.isArray(user.roles) ? user.roles : [];
+    return this.agricultureService.deleteHarvest(id, user.id, roles);
   }
 
 }

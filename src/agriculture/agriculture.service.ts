@@ -16,6 +16,9 @@ import { CropCycleQueryDto } from './dto/crop-cycle-query.dto.js';
 import { CreateCropFieldLogDto } from './dto/create-crop-field-log.dto.js';
 import { UpdateCropFieldLogDto } from './dto/update-crop-field-log.dto.js';
 import { CropFieldLogQueryDto } from './dto/crop-field-log-query.dto.js';
+import { CreateHarvestRecordDto } from './dto/create-harvest-record.dto.js';
+import { UpdateHarvestRecordDto } from './dto/update-harvest-record.dto.js';
+import { HarvestQueryDto } from './dto/harvest-query.dto.js';
 
 @Injectable()
 export class AgricultureService {
@@ -1467,6 +1470,440 @@ export class AgricultureService {
 
     return {
       message: `Field log '${existing.title}' deleted successfully`,
+      id,
+      cropCycleId: existing.cropCycleId,
+    };
+  }
+
+
+  // ==========================================
+  // FEATURE 4: HARVEST RECORDS & YIELD TRACKING
+  // ==========================================
+
+  /**
+   * Record a new harvest batch for a crop cycle.
+   */
+  async recordHarvest(
+    cropCycleId: string,
+    dto: CreateHarvestRecordDto,
+    recorderId: string,
+  ) {
+    const cycle = await this.prisma.cropCycle.findUnique({
+      where: { id: cropCycleId },
+      include: { farm: { select: { id: true, farmCode: true, name: true } } },
+    });
+
+    if (!cycle) {
+      throw new NotFoundException(`Crop cycle with ID '${cropCycleId}' not found`);
+    }
+
+    // Auto-advance stage to HARVESTING if currently in earlier development stage
+    if (!['HARVESTING', 'COMPLETED'].includes(cycle.stage)) {
+      await this.prisma.cropCycle.update({
+        where: { id: cropCycleId },
+        data: { stage: 'HARVESTING' },
+      });
+    }
+
+    const harvest = await this.prisma.harvestRecord.create({
+      data: {
+        cropCycleId,
+        recordedById: recorderId,
+        harvestDate: dto.harvestDate ? new Date(dto.harvestDate) : new Date(),
+        quantity: dto.quantity,
+        unit: dto.unit || 'KG',
+        qualityGrade: dto.qualityGrade || 'GRADE_A',
+        storageLocation: dto.storageLocation?.trim(),
+        notes: dto.notes?.trim(),
+        estimatedValue: dto.estimatedValue,
+        currency: dto.currency || 'NGN',
+      },
+      include: {
+        recordedBy: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+          },
+        },
+      },
+    });
+
+    // Calculate updated cumulative harvest yield
+    const agg = await this.prisma.harvestRecord.aggregate({
+      where: { cropCycleId },
+      _sum: { quantity: true, estimatedValue: true },
+    });
+
+    const cumulativeQuantity = Number(agg._sum.quantity || 0);
+    const targetYield = cycle.targetYield ? Number(cycle.targetYield) : null;
+    const attainmentPercentage =
+      targetYield && targetYield > 0
+        ? Number(((cumulativeQuantity / targetYield) * 100).toFixed(2))
+        : null;
+
+    await this.auditService.log({
+      userId: recorderId,
+      action: 'HARVEST_RECORDED',
+      entityType: 'HarvestRecord',
+      entityId: harvest.id,
+      newValues: {
+        cropCycleId,
+        quantity: harvest.quantity,
+        unit: harvest.unit,
+        qualityGrade: harvest.qualityGrade,
+        cumulativeQuantity,
+        attainmentPercentage,
+      },
+    });
+
+    return {
+      message: 'Harvest batch recorded successfully',
+      harvest: {
+        id: harvest.id,
+        cropCycleId: harvest.cropCycleId,
+        harvestDate: harvest.harvestDate,
+        quantity: Number(harvest.quantity),
+        unit: harvest.unit,
+        qualityGrade: harvest.qualityGrade,
+        storageLocation: harvest.storageLocation,
+        estimatedValue: harvest.estimatedValue ? Number(harvest.estimatedValue) : null,
+        currency: harvest.currency,
+        notes: harvest.notes,
+        recordedBy: harvest.recordedBy,
+        createdAt: harvest.createdAt,
+      },
+      yieldProgress: {
+        targetYield,
+        cumulativeQuantity,
+        yieldUnit: cycle.yieldUnit,
+        attainmentPercentage,
+        totalCumulativeValue: Number(agg._sum.estimatedValue || 0),
+      },
+    };
+  }
+
+  /**
+   * Retrieve paginated harvest batches for a specific crop cycle.
+   */
+  async getCycleHarvests(cropCycleId: string, query: HarvestQueryDto) {
+    const cycle = await this.prisma.cropCycle.findUnique({
+      where: { id: cropCycleId },
+      select: { id: true, cycleCode: true, cropName: true, targetYield: true, yieldUnit: true },
+    });
+
+    if (!cycle) {
+      throw new NotFoundException(`Crop cycle with ID '${cropCycleId}' not found`);
+    }
+
+    const page = Math.max(1, query.page || 1);
+    const limit = Math.max(1, Math.min(50, query.limit || 10));
+    const skip = (page - 1) * limit;
+
+    const where: Prisma.HarvestRecordWhereInput = {
+      cropCycleId,
+    };
+
+    if (query.qualityGrade) {
+      where.qualityGrade = query.qualityGrade;
+    }
+
+    if (query.startDate || query.endDate) {
+      where.harvestDate = {};
+      if (query.startDate) where.harvestDate.gte = new Date(query.startDate);
+      if (query.endDate) where.harvestDate.lte = new Date(query.endDate);
+    }
+
+    const [harvests, total, agg] = await Promise.all([
+      this.prisma.harvestRecord.findMany({
+        where,
+        include: {
+          recordedBy: {
+            select: { id: true, firstName: true, lastName: true, email: true },
+          },
+        },
+        orderBy: { harvestDate: 'desc' },
+        skip,
+        take: limit,
+      }),
+      this.prisma.harvestRecord.count({ where }),
+      this.prisma.harvestRecord.aggregate({
+        where,
+        _sum: { quantity: true, estimatedValue: true },
+      }),
+    ]);
+
+    return {
+      cropCycle: cycle,
+      harvests: harvests.map((h) => ({
+        id: h.id,
+        harvestDate: h.harvestDate,
+        quantity: Number(h.quantity),
+        unit: h.unit,
+        qualityGrade: h.qualityGrade,
+        storageLocation: h.storageLocation,
+        estimatedValue: h.estimatedValue ? Number(h.estimatedValue) : null,
+        currency: h.currency,
+        notes: h.notes,
+        recordedBy: h.recordedBy,
+        createdAt: h.createdAt,
+      })),
+      meta: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit) || 1,
+        hasMore: page * limit < total,
+        totalQuantity: Number(agg._sum.quantity || 0),
+        totalEstimatedValue: Number(agg._sum.estimatedValue || 0),
+      },
+    };
+  }
+
+  /**
+   * Retrieve comprehensive farm-wide harvest ledger across all crop cycles.
+   */
+  async getFarmHarvests(farmId: string, query: HarvestQueryDto) {
+    const farm = await this.prisma.farm.findUnique({
+      where: { id: farmId },
+      select: { id: true, farmCode: true, name: true },
+    });
+
+    if (!farm) {
+      throw new NotFoundException(`Farm with ID '${farmId}' not found`);
+    }
+
+    const page = Math.max(1, query.page || 1);
+    const limit = Math.max(1, Math.min(50, query.limit || 10));
+    const skip = (page - 1) * limit;
+
+    const where: Prisma.HarvestRecordWhereInput = {
+      cropCycle: { farmId },
+    };
+
+    if (query.qualityGrade) {
+      where.qualityGrade = query.qualityGrade;
+    }
+
+    if (query.startDate || query.endDate) {
+      where.harvestDate = {};
+      if (query.startDate) where.harvestDate.gte = new Date(query.startDate);
+      if (query.endDate) where.harvestDate.lte = new Date(query.endDate);
+    }
+
+    const [harvests, total, agg] = await Promise.all([
+      this.prisma.harvestRecord.findMany({
+        where,
+        include: {
+          cropCycle: {
+            select: { id: true, cycleCode: true, cropName: true, variety: true },
+          },
+          recordedBy: {
+            select: { id: true, firstName: true, lastName: true, email: true },
+          },
+        },
+        orderBy: { harvestDate: 'desc' },
+        skip,
+        take: limit,
+      }),
+      this.prisma.harvestRecord.count({ where }),
+      this.prisma.harvestRecord.aggregate({
+        where,
+        _sum: { quantity: true, estimatedValue: true },
+      }),
+    ]);
+
+    return {
+      farm,
+      harvests: harvests.map((h) => ({
+        id: h.id,
+        cropCycle: h.cropCycle,
+        harvestDate: h.harvestDate,
+        quantity: Number(h.quantity),
+        unit: h.unit,
+        qualityGrade: h.qualityGrade,
+        storageLocation: h.storageLocation,
+        estimatedValue: h.estimatedValue ? Number(h.estimatedValue) : null,
+        currency: h.currency,
+        notes: h.notes,
+        recordedBy: h.recordedBy,
+      })),
+      meta: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit) || 1,
+        hasMore: page * limit < total,
+        totalQuantity: Number(agg._sum.quantity || 0),
+        totalEstimatedValue: Number(agg._sum.estimatedValue || 0),
+      },
+    };
+  }
+
+  /**
+   * Get single harvest batch by ID.
+   */
+  async getHarvestById(id: string) {
+    const harvest = await this.prisma.harvestRecord.findUnique({
+      where: { id },
+      include: {
+        cropCycle: {
+          select: {
+            id: true,
+            cycleCode: true,
+            cropName: true,
+            variety: true,
+            stage: true,
+            farm: { select: { id: true, farmCode: true, name: true, city: true, state: true } },
+          },
+        },
+        recordedBy: {
+          select: { id: true, firstName: true, lastName: true, email: true },
+        },
+      },
+    });
+
+    if (!harvest) {
+      throw new NotFoundException(`Harvest record with ID '${id}' not found`);
+    }
+
+    return {
+      id: harvest.id,
+      cropCycle: harvest.cropCycle,
+      harvestDate: harvest.harvestDate,
+      quantity: Number(harvest.quantity),
+      unit: harvest.unit,
+      qualityGrade: harvest.qualityGrade,
+      storageLocation: harvest.storageLocation,
+      estimatedValue: harvest.estimatedValue ? Number(harvest.estimatedValue) : null,
+      currency: harvest.currency,
+      notes: harvest.notes,
+      recordedBy: harvest.recordedBy,
+      createdAt: harvest.createdAt,
+    };
+  }
+
+  /**
+   * Amend an existing harvest record.
+   */
+  async updateHarvest(
+    id: string,
+    dto: UpdateHarvestRecordDto,
+    editorId: string,
+    userRoles: string[],
+  ) {
+    const existing = await this.prisma.harvestRecord.findUnique({
+      where: { id },
+    });
+
+    if (!existing) {
+      throw new NotFoundException(`Harvest record with ID '${id}' not found`);
+    }
+
+    const isAdmin = userRoles.some((r) =>
+      ['ADMIN', 'SUPER_ADMIN', 'PROPERTY_MANAGER'].includes(r.toUpperCase()),
+    );
+    if (!isAdmin && existing.recordedById !== editorId) {
+      throw new ForbiddenException(
+        'Only an administrator, property manager, or the author can update this harvest record',
+      );
+    }
+
+    const updated = await this.prisma.harvestRecord.update({
+      where: { id },
+      data: {
+        quantity: dto.quantity !== undefined ? dto.quantity : undefined,
+        unit: dto.unit !== undefined ? dto.unit.trim() : undefined,
+        qualityGrade: dto.qualityGrade !== undefined ? dto.qualityGrade : undefined,
+        harvestDate: dto.harvestDate !== undefined ? new Date(dto.harvestDate) : undefined,
+        storageLocation:
+          dto.storageLocation !== undefined ? dto.storageLocation.trim() : undefined,
+        estimatedValue:
+          dto.estimatedValue !== undefined ? dto.estimatedValue : undefined,
+        notes: dto.notes !== undefined ? dto.notes.trim() : undefined,
+      },
+      include: {
+        recordedBy: {
+          select: { id: true, firstName: true, lastName: true, email: true },
+        },
+      },
+    });
+
+    await this.auditService.log({
+      userId: editorId,
+      action: 'HARVEST_UPDATED',
+      entityType: 'HarvestRecord',
+      entityId: id,
+      oldValues: {
+        quantity: existing.quantity,
+        qualityGrade: existing.qualityGrade,
+      },
+      newValues: {
+        quantity: updated.quantity,
+        qualityGrade: updated.qualityGrade,
+      },
+    });
+
+    return {
+      message: 'Harvest record amended successfully',
+      harvest: {
+        id: updated.id,
+        cropCycleId: updated.cropCycleId,
+        harvestDate: updated.harvestDate,
+        quantity: Number(updated.quantity),
+        unit: updated.unit,
+        qualityGrade: updated.qualityGrade,
+        storageLocation: updated.storageLocation,
+        estimatedValue: updated.estimatedValue ? Number(updated.estimatedValue) : null,
+        notes: updated.notes,
+        recordedBy: updated.recordedBy,
+      },
+    };
+  }
+
+  /**
+   * Delete a harvest record.
+   */
+  async deleteHarvest(
+    id: string,
+    deleterId: string,
+    userRoles: string[],
+  ) {
+    const existing = await this.prisma.harvestRecord.findUnique({
+      where: { id },
+    });
+
+    if (!existing) {
+      throw new NotFoundException(`Harvest record with ID '${id}' not found`);
+    }
+
+    const isAdmin = userRoles.some((r) =>
+      ['ADMIN', 'SUPER_ADMIN'].includes(r.toUpperCase()),
+    );
+    if (!isAdmin && existing.recordedById !== deleterId) {
+      throw new ForbiddenException(
+        'Only an administrator or the author can delete this harvest record',
+      );
+    }
+
+    await this.prisma.harvestRecord.delete({
+      where: { id },
+    });
+
+    await this.auditService.log({
+      userId: deleterId,
+      action: 'HARVEST_DELETED',
+      entityType: 'HarvestRecord',
+      entityId: id,
+      oldValues: {
+        cropCycleId: existing.cropCycleId,
+        quantity: existing.quantity,
+      },
+    });
+
+    return {
+      message: 'Harvest record deleted successfully',
       id,
       cropCycleId: existing.cropCycleId,
     };
