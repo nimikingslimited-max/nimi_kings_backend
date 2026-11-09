@@ -2,6 +2,7 @@ import {
   Injectable,
   NotFoundException,
   BadRequestException,
+  ForbiddenException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../common/prisma/prisma.service.js';
@@ -12,6 +13,9 @@ import { FarmQueryDto } from './dto/farm-query.dto.js';
 import { CreateCropCycleDto } from './dto/create-crop-cycle.dto.js';
 import { UpdateCropCycleDto } from './dto/update-crop-cycle.dto.js';
 import { CropCycleQueryDto } from './dto/crop-cycle-query.dto.js';
+import { CreateCropFieldLogDto } from './dto/create-crop-field-log.dto.js';
+import { UpdateCropFieldLogDto } from './dto/update-crop-field-log.dto.js';
+import { CropFieldLogQueryDto } from './dto/crop-field-log-query.dto.js';
 
 @Injectable()
 export class AgricultureService {
@@ -1085,6 +1089,386 @@ export class AgricultureService {
       message: `Crop cycle '${existing.cropName}' (${existing.cycleCode}) deleted successfully`,
       id,
       farmId: existing.farmId,
+    };
+  }
+
+
+  // ==========================================
+  // FEATURE 3: AGRONOMIC FIELD LOGS & MEDIA
+  // ==========================================
+
+  /**
+   * Record a new agronomic field scouting log with stage, observations, and photos/videos.
+   */
+  async createFieldLog(
+    cropCycleId: string,
+    dto: CreateCropFieldLogDto,
+    authorId: string,
+  ) {
+    const cycle = await this.prisma.cropCycle.findUnique({
+      where: { id: cropCycleId },
+      include: {
+        farm: { select: { id: true, farmCode: true, name: true, farmManagerId: true } },
+      },
+    });
+
+    if (!cycle) {
+      throw new NotFoundException(`Crop cycle with ID '${cropCycleId}' not found`);
+    }
+
+    // Auto-advance crop cycle stage if log reflects a newer stage
+    if (cycle.stage !== dto.stage && dto.stage !== 'CANCELLED') {
+      await this.prisma.cropCycle.update({
+        where: { id: cropCycleId },
+        data: { stage: dto.stage },
+      });
+    }
+
+    const log = await this.prisma.cropFieldLog.create({
+      data: {
+        cropCycleId,
+        recordedById: authorId,
+        title: dto.title.trim(),
+        notes: dto.notes.trim(),
+        stage: dto.stage,
+        weatherCondition: dto.weatherCondition?.trim(),
+        soilCondition: dto.soilCondition?.trim(),
+        growthPercentage: dto.growthPercentage,
+        media:
+          dto.media && dto.media.length > 0
+            ? {
+                create: dto.media.map((m) => ({
+                  type: m.type || 'IMAGE',
+                  url: m.url.trim(),
+                  storageKey: m.storageKey.trim(),
+                })),
+              }
+            : undefined,
+      },
+      include: {
+        recordedBy: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+          },
+        },
+        media: true,
+      },
+    });
+
+    await this.auditService.log({
+      userId: authorId,
+      action: 'CROP_FIELD_LOG_CREATED',
+      entityType: 'CropFieldLog',
+      entityId: log.id,
+      newValues: {
+        cropCycleId,
+        title: log.title,
+        stage: log.stage,
+        growthPercentage: log.growthPercentage,
+        mediaCount: log.media.length,
+      },
+    });
+
+    return {
+      message: 'Field observation log recorded successfully',
+      fieldLog: {
+        id: log.id,
+        cropCycleId: log.cropCycleId,
+        title: log.title,
+        notes: log.notes,
+        stage: log.stage,
+        weatherCondition: log.weatherCondition,
+        soilCondition: log.soilCondition,
+        growthPercentage: log.growthPercentage ? Number(log.growthPercentage) : null,
+        recordedBy: log.recordedBy,
+        media: log.media.map((m) => ({
+          id: m.id,
+          type: m.type,
+          url: m.url,
+          storageKey: m.storageKey,
+        })),
+        createdAt: log.createdAt,
+      },
+    };
+  }
+
+  /**
+   * Retrieve chronological logbook of field observations for a crop cycle.
+   */
+  async getCropFieldLogs(cropCycleId: string, query: CropFieldLogQueryDto) {
+    const cycle = await this.prisma.cropCycle.findUnique({
+      where: { id: cropCycleId },
+      select: { id: true, cycleCode: true, cropName: true, stage: true, farmId: true },
+    });
+
+    if (!cycle) {
+      throw new NotFoundException(`Crop cycle with ID '${cropCycleId}' not found`);
+    }
+
+    const page = Math.max(1, query.page || 1);
+    const limit = Math.max(1, Math.min(50, query.limit || 10));
+    const skip = (page - 1) * limit;
+
+    const where: Prisma.CropFieldLogWhereInput = {
+      cropCycleId,
+    };
+
+    if (query.stage) {
+      where.stage = query.stage;
+    }
+
+    if (query.startDate || query.endDate) {
+      where.createdAt = {};
+      if (query.startDate) where.createdAt.gte = new Date(query.startDate);
+      if (query.endDate) where.createdAt.lte = new Date(query.endDate);
+    }
+
+    const [logs, total] = await Promise.all([
+      this.prisma.cropFieldLog.findMany({
+        where,
+        include: {
+          recordedBy: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              email: true,
+            },
+          },
+          media: true,
+        },
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: limit,
+      }),
+      this.prisma.cropFieldLog.count({ where }),
+    ]);
+
+    return {
+      cropCycle: cycle,
+      logs: logs.map((l) => ({
+        id: l.id,
+        title: l.title,
+        notes: l.notes,
+        stage: l.stage,
+        weatherCondition: l.weatherCondition,
+        soilCondition: l.soilCondition,
+        growthPercentage: l.growthPercentage ? Number(l.growthPercentage) : null,
+        recordedBy: l.recordedBy,
+        media: l.media.map((m) => ({
+          id: m.id,
+          type: m.type,
+          url: m.url,
+          storageKey: m.storageKey,
+        })),
+        createdAt: l.createdAt,
+      })),
+      meta: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit) || 1,
+        hasMore: page * limit < total,
+      },
+    };
+  }
+
+  /**
+   * Get single field log by ID.
+   */
+  async getFieldLogById(id: string) {
+    const log = await this.prisma.cropFieldLog.findUnique({
+      where: { id },
+      include: {
+        cropCycle: {
+          select: {
+            id: true,
+            cycleCode: true,
+            cropName: true,
+            variety: true,
+            stage: true,
+            farm: {
+              select: { id: true, farmCode: true, name: true, city: true, state: true },
+            },
+          },
+        },
+        recordedBy: {
+          select: { id: true, firstName: true, lastName: true, email: true },
+        },
+        media: true,
+      },
+    });
+
+    if (!log) {
+      throw new NotFoundException(`Field log with ID '${id}' not found`);
+    }
+
+    return {
+      id: log.id,
+      cropCycle: log.cropCycle,
+      title: log.title,
+      notes: log.notes,
+      stage: log.stage,
+      weatherCondition: log.weatherCondition,
+      soilCondition: log.soilCondition,
+      growthPercentage: log.growthPercentage ? Number(log.growthPercentage) : null,
+      recordedBy: log.recordedBy,
+      media: log.media.map((m) => ({
+        id: m.id,
+        type: m.type,
+        url: m.url,
+        storageKey: m.storageKey,
+      })),
+      createdAt: log.createdAt,
+    };
+  }
+
+  /**
+   * Amend an existing field log or append new site photos/media.
+   */
+  async updateFieldLog(
+    id: string,
+    dto: UpdateCropFieldLogDto,
+    editorId: string,
+    userRoles: string[],
+  ) {
+    const existing = await this.prisma.cropFieldLog.findUnique({
+      where: { id },
+      include: { media: true },
+    });
+
+    if (!existing) {
+      throw new NotFoundException(`Field log with ID '${id}' not found`);
+    }
+
+    const isAdmin = userRoles.some((r) =>
+      ['ADMIN', 'SUPER_ADMIN', 'PROPERTY_MANAGER'].includes(r.toUpperCase()),
+    );
+    if (!isAdmin && existing.recordedById !== editorId) {
+      throw new ForbiddenException(
+        'Only an administrator, property manager, or the author can update this field log',
+      );
+    }
+
+    if (dto.newMedia && dto.newMedia.length > 0) {
+      await this.prisma.cropFieldLogMedia.createMany({
+        data: dto.newMedia.map((m) => ({
+          fieldLogId: id,
+          type: m.type || 'IMAGE',
+          url: m.url.trim(),
+          storageKey: m.storageKey.trim(),
+        })),
+      });
+    }
+
+    const updated = await this.prisma.cropFieldLog.update({
+      where: { id },
+      data: {
+        title: dto.title !== undefined ? dto.title.trim() : undefined,
+        notes: dto.notes !== undefined ? dto.notes.trim() : undefined,
+        stage: dto.stage !== undefined ? dto.stage : undefined,
+        weatherCondition:
+          dto.weatherCondition !== undefined ? dto.weatherCondition.trim() : undefined,
+        soilCondition:
+          dto.soilCondition !== undefined ? dto.soilCondition.trim() : undefined,
+        growthPercentage:
+          dto.growthPercentage !== undefined ? dto.growthPercentage : undefined,
+      },
+      include: {
+        recordedBy: {
+          select: { id: true, firstName: true, lastName: true, email: true },
+        },
+        media: true,
+      },
+    });
+
+    await this.auditService.log({
+      userId: editorId,
+      action: 'CROP_FIELD_LOG_UPDATED',
+      entityType: 'CropFieldLog',
+      entityId: id,
+      oldValues: {
+        title: existing.title,
+        stage: existing.stage,
+      },
+      newValues: {
+        title: updated.title,
+        stage: updated.stage,
+      },
+    });
+
+    return {
+      message: 'Field log amended successfully',
+      fieldLog: {
+        id: updated.id,
+        cropCycleId: updated.cropCycleId,
+        title: updated.title,
+        notes: updated.notes,
+        stage: updated.stage,
+        weatherCondition: updated.weatherCondition,
+        soilCondition: updated.soilCondition,
+        growthPercentage: updated.growthPercentage
+          ? Number(updated.growthPercentage)
+          : null,
+        recordedBy: updated.recordedBy,
+        media: updated.media.map((m) => ({
+          id: m.id,
+          type: m.type,
+          url: m.url,
+          storageKey: m.storageKey,
+        })),
+        createdAt: updated.createdAt,
+      },
+    };
+  }
+
+  /**
+   * Delete a field log and attached media records.
+   */
+  async deleteFieldLog(
+    id: string,
+    deleterId: string,
+    userRoles: string[],
+  ) {
+    const existing = await this.prisma.cropFieldLog.findUnique({
+      where: { id },
+    });
+
+    if (!existing) {
+      throw new NotFoundException(`Field log with ID '${id}' not found`);
+    }
+
+    const isAdmin = userRoles.some((r) =>
+      ['ADMIN', 'SUPER_ADMIN'].includes(r.toUpperCase()),
+    );
+    if (!isAdmin && existing.recordedById !== deleterId) {
+      throw new ForbiddenException(
+        'Only an administrator or the author can delete this field log',
+      );
+    }
+
+    await this.prisma.cropFieldLog.delete({
+      where: { id },
+    });
+
+    await this.auditService.log({
+      userId: deleterId,
+      action: 'CROP_FIELD_LOG_DELETED',
+      entityType: 'CropFieldLog',
+      entityId: id,
+      oldValues: {
+        cropCycleId: existing.cropCycleId,
+        title: existing.title,
+      },
+    });
+
+    return {
+      message: `Field log '${existing.title}' deleted successfully`,
+      id,
+      cropCycleId: existing.cropCycleId,
     };
   }
 

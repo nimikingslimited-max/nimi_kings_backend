@@ -24,6 +24,9 @@ import { FarmQueryDto } from './dto/farm-query.dto.js';
 import { CreateCropCycleDto } from './dto/create-crop-cycle.dto.js';
 import { UpdateCropCycleDto } from './dto/update-crop-cycle.dto.js';
 import { CropCycleQueryDto } from './dto/crop-cycle-query.dto.js';
+import { CreateCropFieldLogDto } from './dto/create-crop-field-log.dto.js';
+import { UpdateCropFieldLogDto } from './dto/update-crop-field-log.dto.js';
+import { CropFieldLogQueryDto } from './dto/crop-field-log-query.dto.js';
 import { Roles } from '../common/decorators/roles.decorator.js';
 import { CurrentUser } from '../common/decorators/current-user.decorator.js';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard.js';
@@ -250,6 +253,117 @@ export class AgricultureController {
     @CurrentUser('id') deleterId: string,
   ) {
     return this.agricultureService.deleteCropCycle(id, deleterId);
+  }
+
+
+  // ==========================================
+  // FEATURE 3: AGRONOMIC FIELD LOGS & MEDIA
+  // ==========================================
+
+  @Post('crop-cycles/:cycleId/logs')
+  @Roles(
+    RoleType.ADMIN,
+    RoleType.SUPER_ADMIN,
+    RoleType.PROPERTY_MANAGER,
+    RoleType.AGENT,
+  )
+  @ApiOperation({
+    summary:
+      'Record an agronomic field observation log (growth %, weather, scouting notes, site photos/media)',
+  })
+  @ApiParam({ name: 'cycleId', description: 'Crop Cycle UUID' })
+  @ApiResponse({
+    status: 201,
+    description: 'Field observation log recorded successfully',
+  })
+  createFieldLog(
+    @Param('cycleId') cycleId: string,
+    @Body() dto: CreateCropFieldLogDto,
+    @CurrentUser('id') authorId: string,
+  ) {
+    return this.agricultureService.createFieldLog(cycleId, dto, authorId);
+  }
+
+  @Get('crop-cycles/:cycleId/logs')
+  @ApiOperation({
+    summary:
+      'Retrieve paginated chronological logbook of field observations and photos for a crop cycle',
+  })
+  @ApiParam({ name: 'cycleId', description: 'Crop Cycle UUID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Chronological field logs and media feed',
+  })
+  getCropFieldLogs(
+    @Param('cycleId') cycleId: string,
+    @Query() query: CropFieldLogQueryDto,
+  ) {
+    return this.agricultureService.getCropFieldLogs(cycleId, query);
+  }
+
+  @Get('logs/:id')
+  @ApiOperation({
+    summary: 'Get details of a single field log and attached media items',
+  })
+  @ApiParam({ name: 'id', description: 'Field Log UUID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Field log details',
+  })
+  @ApiResponse({
+    status: 404,
+    description: 'Field log not found',
+  })
+  getFieldLogById(@Param('id') id: string) {
+    return this.agricultureService.getFieldLogById(id);
+  }
+
+  @Patch('logs/:id')
+  @Roles(
+    RoleType.ADMIN,
+    RoleType.SUPER_ADMIN,
+    RoleType.PROPERTY_MANAGER,
+    RoleType.AGENT,
+  )
+  @ApiOperation({
+    summary:
+      'Update field log notes, observations, or attach additional media photos/videos',
+  })
+  @ApiParam({ name: 'id', description: 'Field Log UUID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Field log amended successfully',
+  })
+  updateFieldLog(
+    @Param('id') id: string,
+    @Body() dto: UpdateCropFieldLogDto,
+    @CurrentUser() user: { id: string; roles?: string[] },
+  ) {
+    const roles = Array.isArray(user.roles) ? user.roles : [];
+    return this.agricultureService.updateFieldLog(id, dto, user.id, roles);
+  }
+
+  @Delete('logs/:id')
+  @Roles(
+    RoleType.ADMIN,
+    RoleType.SUPER_ADMIN,
+    RoleType.PROPERTY_MANAGER,
+    RoleType.AGENT,
+  )
+  @ApiOperation({
+    summary: 'Delete a field log and attached media records',
+  })
+  @ApiParam({ name: 'id', description: 'Field Log UUID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Field log deleted successfully',
+  })
+  deleteFieldLog(
+    @Param('id') id: string,
+    @CurrentUser() user: { id: string; roles?: string[] },
+  ) {
+    const roles = Array.isArray(user.roles) ? user.roles : [];
+    return this.agricultureService.deleteFieldLog(id, user.id, roles);
   }
 
 }
