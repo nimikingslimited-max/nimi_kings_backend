@@ -17,6 +17,7 @@ import { MessagingModule } from './messaging/messaging.module.js';
 import { AuditModule } from './common/audit/audit.module.js';
 import { AdminModule } from './admin/admin.module.js';
 import { ConstructionModule } from './construction/construction.module.js';
+import { AgricultureModule } from './agriculture/agriculture.module.js';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard.js';
 import { RolesGuard } from './common/guards/roles.guard.js';
 
@@ -39,6 +40,7 @@ import { RolesGuard } from './common/guards/roles.guard.js';
     NotificationsModule,
     MessagingModule,
     ConstructionModule,
+    AgricultureModule,
   ],
   controllers: [AppController],
   providers: [
