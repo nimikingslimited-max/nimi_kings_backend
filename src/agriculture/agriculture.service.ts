@@ -9,6 +9,9 @@ import { AuditService } from '../common/audit/audit.service.js';
 import { CreateFarmDto } from './dto/create-farm.dto.js';
 import { UpdateFarmDto } from './dto/update-farm.dto.js';
 import { FarmQueryDto } from './dto/farm-query.dto.js';
+import { CreateCropCycleDto } from './dto/create-crop-cycle.dto.js';
+import { UpdateCropCycleDto } from './dto/update-crop-cycle.dto.js';
+import { CropCycleQueryDto } from './dto/crop-cycle-query.dto.js';
 
 @Injectable()
 export class AgricultureService {
@@ -16,6 +19,16 @@ export class AgricultureService {
     private readonly prisma: PrismaService,
     private readonly auditService: AuditService,
   ) {}
+
+
+  private generateCycleCode(): string {
+    const chars = '0123456789ABCDEFGHJKLMNPQRSTUVWXYZ';
+    let code = 'NK-CC-';
+    for (let i = 0; i < 5; i++) {
+      code += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return code;
+  }
 
   private generateFarmCode(): string {
     const chars = '0123456789ABCDEFGHJKLMNPQRSTUVWXYZ';
@@ -549,4 +562,530 @@ export class AgricultureService {
       id,
     };
   }
+
+  // ==========================================
+  // FEATURE 2: CROP CYCLES & CULTIVATION PHASES
+  // ==========================================
+
+  /**
+   * Initiate a new crop cultivation cycle on a farm estate with area allocation guard.
+   */
+  async createCropCycle(
+    farmId: string,
+    dto: CreateCropCycleDto,
+    creatorId: string,
+  ) {
+    const farm = await this.prisma.farm.findUnique({
+      where: { id: farmId },
+      select: {
+        id: true,
+        farmCode: true,
+        name: true,
+        totalArea: true,
+        areaUnit: true,
+      },
+    });
+
+    if (!farm) {
+      throw new NotFoundException(`Farm estate with ID '${farmId}' not found`);
+    }
+
+    // Capacity Guard: verify allocatedArea does not exceed remaining unallocated land
+    const activeCycles = await this.prisma.cropCycle.findMany({
+      where: {
+        farmId,
+        stage: { notIn: ['COMPLETED', 'CANCELLED'] },
+      },
+      select: { allocatedArea: true },
+    });
+
+    const currentAllocated = activeCycles.reduce(
+      (sum, c) => sum + Number(c.allocatedArea),
+      0,
+    );
+    const totalFarmArea = Number(farm.totalArea);
+    const remainingArea = Math.max(0, totalFarmArea - currentAllocated);
+
+    if (currentAllocated + dto.allocatedArea > totalFarmArea) {
+      throw new BadRequestException(
+        `Cannot allocate ${dto.allocatedArea} ${dto.areaUnit || farm.areaUnit}. Total farm area is ${totalFarmArea}, with ${currentAllocated.toFixed(2)} already allocated across active crop cycles (remaining available: ${remainingArea.toFixed(2)}).`,
+      );
+    }
+
+    let cycleCode = this.generateCycleCode();
+    let collision = await this.prisma.cropCycle.findUnique({ where: { cycleCode } });
+    while (collision) {
+      cycleCode = this.generateCycleCode();
+      collision = await this.prisma.cropCycle.findUnique({ where: { cycleCode } });
+    }
+
+    const cycle = await this.prisma.cropCycle.create({
+      data: {
+        cycleCode,
+        farmId,
+        cropName: dto.cropName.trim(),
+        variety: dto.variety?.trim(),
+        stage: dto.stage || 'PLANNED',
+        allocatedArea: dto.allocatedArea,
+        areaUnit: dto.areaUnit || farm.areaUnit,
+        startDate: dto.startDate ? new Date(dto.startDate) : undefined,
+        expectedHarvestDate: dto.expectedHarvestDate
+          ? new Date(dto.expectedHarvestDate)
+          : undefined,
+        targetYield: dto.targetYield,
+        yieldUnit: dto.yieldUnit || 'KG',
+        estimatedBudget: dto.estimatedBudget,
+      },
+      include: {
+        farm: {
+          select: { id: true, farmCode: true, name: true },
+        },
+      },
+    });
+
+    await this.auditService.log({
+      userId: creatorId,
+      action: 'CROP_CYCLE_CREATED',
+      entityType: 'CropCycle',
+      entityId: cycle.id,
+      newValues: {
+        farmId,
+        cycleCode: cycle.cycleCode,
+        cropName: cycle.cropName,
+        stage: cycle.stage,
+        allocatedArea: cycle.allocatedArea,
+      },
+    });
+
+    const updatedRemainingArea = Math.max(
+      0,
+      totalFarmArea - (currentAllocated + dto.allocatedArea),
+    );
+
+    return {
+      message: 'Crop cultivation cycle initiated successfully',
+      cropCycle: {
+        id: cycle.id,
+        cycleCode: cycle.cycleCode,
+        cropName: cycle.cropName,
+        variety: cycle.variety,
+        stage: cycle.stage,
+        allocatedArea: Number(cycle.allocatedArea),
+        areaUnit: cycle.areaUnit,
+        startDate: cycle.startDate,
+        expectedHarvestDate: cycle.expectedHarvestDate,
+        targetYield: cycle.targetYield ? Number(cycle.targetYield) : null,
+        yieldUnit: cycle.yieldUnit,
+        estimatedBudget: cycle.estimatedBudget ? Number(cycle.estimatedBudget) : null,
+        farm: cycle.farm,
+        createdAt: cycle.createdAt,
+      },
+      farmLandUtilization: {
+        totalFarmArea,
+        allocatedArea: Number((currentAllocated + dto.allocatedArea).toFixed(2)),
+        remainingArea: Number(updatedRemainingArea.toFixed(2)),
+      },
+    };
+  }
+
+  /**
+   * List crop cycles for a specific farm with optional stage and cropName filters.
+   */
+  async getFarmCropCycles(farmId: string, query: CropCycleQueryDto) {
+    const farm = await this.prisma.farm.findUnique({
+      where: { id: farmId },
+      select: { id: true, name: true, farmCode: true, totalArea: true, areaUnit: true },
+    });
+
+    if (!farm) {
+      throw new NotFoundException(`Farm estate with ID '${farmId}' not found`);
+    }
+
+    const page = Math.max(1, query.page || 1);
+    const limit = Math.max(1, Math.min(50, query.limit || 10));
+    const skip = (page - 1) * limit;
+
+    const where: Prisma.CropCycleWhereInput = {
+      farmId,
+    };
+
+    if (query.stage) {
+      where.stage = query.stage;
+    }
+
+    if (query.cropName) {
+      where.cropName = { contains: query.cropName.trim(), mode: 'insensitive' };
+    }
+
+    const [cycles, total] = await Promise.all([
+      this.prisma.cropCycle.findMany({
+        where,
+        include: {
+          fieldLogs: {
+            orderBy: { createdAt: 'desc' },
+            take: 1,
+            select: {
+              id: true,
+              title: true,
+              stage: true,
+              growthPercentage: true,
+              createdAt: true,
+            },
+          },
+          harvests: {
+            select: { quantity: true, unit: true },
+          },
+          _count: {
+            select: {
+              fieldLogs: true,
+              harvests: true,
+              expenses: true,
+            },
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: limit,
+      }),
+      this.prisma.cropCycle.count({ where }),
+    ]);
+
+    const formatted = cycles.map((c) => {
+      const totalHarvested = c.harvests.reduce(
+        (sum, h) => sum + Number(h.quantity),
+        0,
+      );
+      const latestLog = c.fieldLogs[0];
+
+      return {
+        id: c.id,
+        cycleCode: c.cycleCode,
+        cropName: c.cropName,
+        variety: c.variety,
+        stage: c.stage,
+        allocatedArea: Number(c.allocatedArea),
+        areaUnit: c.areaUnit,
+        startDate: c.startDate,
+        expectedHarvestDate: c.expectedHarvestDate,
+        actualHarvestDate: c.actualHarvestDate,
+        targetYield: c.targetYield ? Number(c.targetYield) : null,
+        yieldUnit: c.yieldUnit,
+        totalHarvested: Number(totalHarvested.toFixed(2)),
+        fieldLogsCount: c._count.fieldLogs,
+        harvestsCount: c._count.harvests,
+        expensesCount: c._count.expenses,
+        latestFieldLog: latestLog
+          ? {
+              title: latestLog.title,
+              stage: latestLog.stage,
+              growthPercentage: latestLog.growthPercentage
+                ? Number(latestLog.growthPercentage)
+                : null,
+              date: latestLog.createdAt,
+            }
+          : null,
+        createdAt: c.createdAt,
+      };
+    });
+
+    return {
+      farm,
+      cropCycles: formatted,
+      meta: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit) || 1,
+        hasMore: page * limit < total,
+      },
+    };
+  }
+
+  /**
+   * Detailed dossier of a single crop cycle.
+   */
+  async getCropCycleById(id: string) {
+    const cycle = await this.prisma.cropCycle.findUnique({
+      where: { id },
+      include: {
+        farm: {
+          select: {
+            id: true,
+            farmCode: true,
+            name: true,
+            city: true,
+            state: true,
+            soilType: true,
+            irrigationSource: true,
+            totalArea: true,
+            areaUnit: true,
+            farmManager: {
+              select: { id: true, firstName: true, lastName: true, email: true },
+            },
+          },
+        },
+        fieldLogs: {
+          orderBy: { createdAt: 'desc' },
+          take: 5,
+          include: {
+            media: true,
+            recordedBy: {
+              select: { id: true, firstName: true, lastName: true },
+            },
+          },
+        },
+        harvests: {
+          orderBy: { harvestDate: 'desc' },
+          take: 5,
+          include: {
+            recordedBy: {
+              select: { id: true, firstName: true, lastName: true },
+            },
+          },
+        },
+        expenses: {
+          orderBy: { expenseDate: 'desc' },
+          take: 5,
+          include: {
+            recordedBy: {
+              select: { id: true, firstName: true, lastName: true },
+            },
+          },
+        },
+      },
+    });
+
+    if (!cycle) {
+      throw new NotFoundException(`Crop cycle with ID '${id}' not found`);
+    }
+
+    const [aggHarvest, aggExpense] = await Promise.all([
+      this.prisma.harvestRecord.aggregate({
+        where: { cropCycleId: id },
+        _sum: { quantity: true, estimatedValue: true },
+        _count: { id: true },
+      }),
+      this.prisma.farmExpense.aggregate({
+        where: { cropCycleId: id },
+        _sum: { amount: true },
+        _count: { id: true },
+      }),
+    ]);
+
+    const totalHarvested = Number(aggHarvest._sum.quantity || 0);
+    const targetYield = cycle.targetYield ? Number(cycle.targetYield) : null;
+    const yieldAttainmentPercentage =
+      targetYield && targetYield > 0
+        ? Number(((totalHarvested / targetYield) * 100).toFixed(2))
+        : null;
+
+    return {
+      cropCycle: {
+        id: cycle.id,
+        cycleCode: cycle.cycleCode,
+        cropName: cycle.cropName,
+        variety: cycle.variety,
+        stage: cycle.stage,
+        allocatedArea: Number(cycle.allocatedArea),
+        areaUnit: cycle.areaUnit,
+        startDate: cycle.startDate,
+        expectedHarvestDate: cycle.expectedHarvestDate,
+        actualHarvestDate: cycle.actualHarvestDate,
+        targetYield,
+        yieldUnit: cycle.yieldUnit,
+        estimatedBudget: cycle.estimatedBudget
+          ? Number(cycle.estimatedBudget)
+          : null,
+        createdAt: cycle.createdAt,
+        updatedAt: cycle.updatedAt,
+      },
+      farm: cycle.farm,
+      yieldSummary: {
+        targetYield,
+        totalHarvested,
+        yieldAttainmentPercentage,
+        estimatedTotalValue: Number(aggHarvest._sum.estimatedValue || 0),
+        totalHarvestBatches: aggHarvest._count.id,
+      },
+      financialSnapshot: {
+        estimatedBudget: cycle.estimatedBudget
+          ? Number(cycle.estimatedBudget)
+          : null,
+        totalDirectExpenses: Number(aggExpense._sum.amount || 0),
+        expenseEntriesCount: aggExpense._count.id,
+      },
+      recentFieldLogs: cycle.fieldLogs.map((l) => ({
+        id: l.id,
+        title: l.title,
+        notes: l.notes,
+        stage: l.stage,
+        weatherCondition: l.weatherCondition,
+        growthPercentage: l.growthPercentage ? Number(l.growthPercentage) : null,
+        recordedBy: l.recordedBy,
+        createdAt: l.createdAt,
+        media: l.media.map((m) => ({ id: m.id, type: m.type, url: m.url })),
+      })),
+      recentHarvests: cycle.harvests.map((h) => ({
+        id: h.id,
+        harvestDate: h.harvestDate,
+        quantity: Number(h.quantity),
+        unit: h.unit,
+        qualityGrade: h.qualityGrade,
+        storageLocation: h.storageLocation,
+        estimatedValue: h.estimatedValue ? Number(h.estimatedValue) : null,
+        recordedBy: h.recordedBy,
+      })),
+    };
+  }
+
+  /**
+   * Update crop cycle stage, allocated area, or harvest dates.
+   */
+  async updateCropCycle(
+    id: string,
+    dto: UpdateCropCycleDto,
+    editorId: string,
+  ) {
+    const existing = await this.prisma.cropCycle.findUnique({
+      where: { id },
+      include: {
+        farm: { select: { totalArea: true, areaUnit: true } },
+      },
+    });
+
+    if (!existing) {
+      throw new NotFoundException(`Crop cycle with ID '${id}' not found`);
+    }
+
+    // Capacity Guard if allocatedArea is being modified
+    if (
+      dto.allocatedArea !== undefined &&
+      dto.allocatedArea !== Number(existing.allocatedArea)
+    ) {
+      const activeCycles = await this.prisma.cropCycle.findMany({
+        where: {
+          farmId: existing.farmId,
+          id: { not: id },
+          stage: { notIn: ['COMPLETED', 'CANCELLED'] },
+        },
+        select: { allocatedArea: true },
+      });
+      const otherAllocated = activeCycles.reduce(
+        (sum, c) => sum + Number(c.allocatedArea),
+        0,
+      );
+      const totalFarmArea = Number(existing.farm.totalArea);
+      if (otherAllocated + dto.allocatedArea > totalFarmArea) {
+        throw new BadRequestException(
+          `Cannot increase allocation to ${dto.allocatedArea}. Other active cycles occupy ${otherAllocated.toFixed(2)} out of ${totalFarmArea} total farm area.`,
+        );
+      }
+    }
+
+    // Auto-set actualHarvestDate when completed
+    let actualHarvestDate =
+      dto.actualHarvestDate !== undefined
+        ? new Date(dto.actualHarvestDate)
+        : existing.actualHarvestDate;
+    if (dto.stage === 'COMPLETED' && !actualHarvestDate) {
+      actualHarvestDate = new Date();
+    }
+
+    const updated = await this.prisma.cropCycle.update({
+      where: { id },
+      data: {
+        cropName: dto.cropName !== undefined ? dto.cropName.trim() : undefined,
+        variety: dto.variety !== undefined ? dto.variety.trim() : undefined,
+        stage: dto.stage !== undefined ? dto.stage : undefined,
+        allocatedArea:
+          dto.allocatedArea !== undefined ? dto.allocatedArea : undefined,
+        areaUnit: dto.areaUnit !== undefined ? dto.areaUnit : undefined,
+        startDate:
+          dto.startDate !== undefined ? new Date(dto.startDate) : undefined,
+        expectedHarvestDate:
+          dto.expectedHarvestDate !== undefined
+            ? new Date(dto.expectedHarvestDate)
+            : undefined,
+        actualHarvestDate,
+        targetYield:
+          dto.targetYield !== undefined ? dto.targetYield : undefined,
+        yieldUnit: dto.yieldUnit !== undefined ? dto.yieldUnit.trim() : undefined,
+        estimatedBudget:
+          dto.estimatedBudget !== undefined ? dto.estimatedBudget : undefined,
+      },
+    });
+
+    await this.auditService.log({
+      userId: editorId,
+      action: 'CROP_CYCLE_UPDATED',
+      entityType: 'CropCycle',
+      entityId: id,
+      oldValues: {
+        stage: existing.stage,
+        allocatedArea: existing.allocatedArea,
+      },
+      newValues: {
+        stage: updated.stage,
+        allocatedArea: updated.allocatedArea,
+      },
+    });
+
+    return {
+      message: 'Crop cultivation cycle amended successfully',
+      cropCycle: {
+        id: updated.id,
+        cycleCode: updated.cycleCode,
+        cropName: updated.cropName,
+        variety: updated.variety,
+        stage: updated.stage,
+        allocatedArea: Number(updated.allocatedArea),
+        areaUnit: updated.areaUnit,
+        startDate: updated.startDate,
+        expectedHarvestDate: updated.expectedHarvestDate,
+        actualHarvestDate: updated.actualHarvestDate,
+        targetYield: updated.targetYield ? Number(updated.targetYield) : null,
+        yieldUnit: updated.yieldUnit,
+        estimatedBudget: updated.estimatedBudget
+          ? Number(updated.estimatedBudget)
+          : null,
+        updatedAt: updated.updatedAt,
+      },
+    };
+  }
+
+  /**
+   * Delete a crop cycle and associated records.
+   */
+  async deleteCropCycle(id: string, deleterId: string) {
+    const existing = await this.prisma.cropCycle.findUnique({
+      where: { id },
+    });
+
+    if (!existing) {
+      throw new NotFoundException(`Crop cycle with ID '${id}' not found`);
+    }
+
+    await this.prisma.cropCycle.delete({
+      where: { id },
+    });
+
+    await this.auditService.log({
+      userId: deleterId,
+      action: 'CROP_CYCLE_DELETED',
+      entityType: 'CropCycle',
+      entityId: id,
+      oldValues: {
+        cycleCode: existing.cycleCode,
+        cropName: existing.cropName,
+        farmId: existing.farmId,
+      },
+    });
+
+    return {
+      message: `Crop cycle '${existing.cropName}' (${existing.cycleCode}) deleted successfully`,
+      id,
+      farmId: existing.farmId,
+    };
+  }
+
 }

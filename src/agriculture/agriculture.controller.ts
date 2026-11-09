@@ -21,6 +21,9 @@ import { AgricultureService } from './agriculture.service.js';
 import { CreateFarmDto } from './dto/create-farm.dto.js';
 import { UpdateFarmDto } from './dto/update-farm.dto.js';
 import { FarmQueryDto } from './dto/farm-query.dto.js';
+import { CreateCropCycleDto } from './dto/create-crop-cycle.dto.js';
+import { UpdateCropCycleDto } from './dto/update-crop-cycle.dto.js';
+import { CropCycleQueryDto } from './dto/crop-cycle-query.dto.js';
 import { Roles } from '../common/decorators/roles.decorator.js';
 import { CurrentUser } from '../common/decorators/current-user.decorator.js';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard.js';
@@ -135,4 +138,118 @@ export class AgricultureController {
   ) {
     return this.agricultureService.deleteFarm(id, deleterId);
   }
+
+  // ==========================================
+  // FEATURE 2: CROP CYCLES & CULTIVATION PHASES
+  // ==========================================
+
+  @Post('farms/:farmId/crop-cycles')
+  @Roles(
+    RoleType.ADMIN,
+    RoleType.SUPER_ADMIN,
+    RoleType.PROPERTY_MANAGER,
+  )
+  @ApiOperation({
+    summary:
+      'Initiate a new crop cultivation cycle on a farm estate with land allocation capacity check',
+  })
+  @ApiParam({ name: 'farmId', description: 'Farm Estate UUID' })
+  @ApiResponse({
+    status: 201,
+    description: 'Crop cycle initiated successfully',
+  })
+  @ApiResponse({
+    status: 400,
+    description: 'Allocated area exceeds available unallocated farm acreage',
+  })
+  createCropCycle(
+    @Param('farmId') farmId: string,
+    @Body() dto: CreateCropCycleDto,
+    @CurrentUser('id') creatorId: string,
+  ) {
+    return this.agricultureService.createCropCycle(farmId, dto, creatorId);
+  }
+
+  @Get('farms/:farmId/crop-cycles')
+  @Roles(
+    RoleType.ADMIN,
+    RoleType.SUPER_ADMIN,
+    RoleType.PROPERTY_MANAGER,
+    RoleType.AGENT,
+  )
+  @ApiOperation({
+    summary:
+      'Retrieve paginated list of crop cycles on a farm with stage and crop name filters',
+  })
+  @ApiParam({ name: 'farmId', description: 'Farm Estate UUID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Paginated list of crop cycles with harvested yield statistics',
+  })
+  getFarmCropCycles(
+    @Param('farmId') farmId: string,
+    @Query() query: CropCycleQueryDto,
+  ) {
+    return this.agricultureService.getFarmCropCycles(farmId, query);
+  }
+
+  @Get('crop-cycles/:id')
+  @ApiOperation({
+    summary:
+      'Get detailed dossier of a single crop cycle (progress, yield attainment %, logs, direct expenses)',
+  })
+  @ApiParam({ name: 'id', description: 'Crop Cycle UUID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Detailed crop cycle profile and yield analytics',
+  })
+  @ApiResponse({
+    status: 404,
+    description: 'Crop cycle not found',
+  })
+  getCropCycleById(@Param('id') id: string) {
+    return this.agricultureService.getCropCycleById(id);
+  }
+
+  @Patch('crop-cycles/:id')
+  @Roles(
+    RoleType.ADMIN,
+    RoleType.SUPER_ADMIN,
+    RoleType.PROPERTY_MANAGER,
+  )
+  @ApiOperation({
+    summary:
+      'Update crop cycle stage, allocated area, or harvest dates',
+  })
+  @ApiParam({ name: 'id', description: 'Crop Cycle UUID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Crop cycle amended successfully',
+  })
+  updateCropCycle(
+    @Param('id') id: string,
+    @Body() dto: UpdateCropCycleDto,
+    @CurrentUser('id') editorId: string,
+  ) {
+    return this.agricultureService.updateCropCycle(id, dto, editorId);
+  }
+
+  @Delete('crop-cycles/:id')
+  @Roles(RoleType.ADMIN, RoleType.SUPER_ADMIN)
+  @ApiOperation({
+    summary:
+      'Delete a crop cycle and cascade delete its field logs and harvest records',
+  })
+  @ApiParam({ name: 'id', description: 'Crop Cycle UUID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Crop cycle deleted successfully',
+  })
+  deleteCropCycle(
+    @Param('id') id: string,
+    @CurrentUser('id') deleterId: string,
+  ) {
+    return this.agricultureService.deleteCropCycle(id, deleterId);
+  }
+
 }
