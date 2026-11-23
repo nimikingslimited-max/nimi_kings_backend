@@ -30,6 +30,11 @@ import { CropFieldLogQueryDto } from './dto/crop-field-log-query.dto.js';
 import { CreateHarvestRecordDto } from './dto/create-harvest-record.dto.js';
 import { UpdateHarvestRecordDto } from './dto/update-harvest-record.dto.js';
 import { HarvestQueryDto } from './dto/harvest-query.dto.js';
+import { CreateFarmExpenseDto } from './dto/create-farm-expense.dto.js';
+import { CreateFarmRevenueDto } from './dto/create-farm-revenue.dto.js';
+import { FarmFinanceQueryDto } from './dto/farm-finance-query.dto.js';
+import { PublicFarmQueryDto } from './dto/public-farm-query.dto.js';
+import { Public } from '../common/decorators/public.decorator.js';
 import { Roles } from '../common/decorators/roles.decorator.js';
 import { CurrentUser } from '../common/decorators/current-user.decorator.js';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard.js';
@@ -500,6 +505,174 @@ export class AgricultureController {
   ) {
     const roles = Array.isArray(user.roles) ? user.roles : [];
     return this.agricultureService.deleteHarvest(id, user.id, roles);
+  }
+
+
+  // ==========================================
+  // FEATURE 5: FARM FINANCIALS & PUBLIC/INVESTOR PORTAL
+  // ==========================================
+
+  @Post('farms/:farmId/expenses')
+  @Roles(
+    RoleType.ADMIN,
+    RoleType.SUPER_ADMIN,
+    RoleType.PROPERTY_MANAGER,
+    RoleType.FINANCE_OFFICER,
+  )
+  @ApiOperation({
+    summary:
+      'Record an operating expenditure (seeds, fertilizer, agrochemicals, labour) against a farm budget',
+  })
+  @ApiParam({ name: 'farmId', description: 'Farm Estate UUID' })
+  @ApiResponse({
+    status: 201,
+    description: 'Farm expense recorded successfully with financial snapshot',
+  })
+  recordFarmExpense(
+    @Param('farmId') farmId: string,
+    @Body() dto: CreateFarmExpenseDto,
+    @CurrentUser('id') recorderId: string,
+  ) {
+    return this.agricultureService.recordFarmExpense(farmId, dto, recorderId);
+  }
+
+  @Get('farms/:farmId/expenses')
+  @Roles(
+    RoleType.ADMIN,
+    RoleType.SUPER_ADMIN,
+    RoleType.PROPERTY_MANAGER,
+    RoleType.FINANCE_OFFICER,
+    RoleType.AGENT,
+  )
+  @ApiOperation({
+    summary:
+      'Retrieve paginated ledger of farm expenditures with category and cycle filters',
+  })
+  @ApiParam({ name: 'farmId', description: 'Farm Estate UUID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Paginated farm expense records',
+  })
+  getFarmExpenses(
+    @Param('farmId') farmId: string,
+    @Query() query: FarmFinanceQueryDto,
+  ) {
+    return this.agricultureService.getFarmExpenses(farmId, query);
+  }
+
+  @Post('farms/:farmId/revenues')
+  @Roles(
+    RoleType.ADMIN,
+    RoleType.SUPER_ADMIN,
+    RoleType.PROPERTY_MANAGER,
+    RoleType.FINANCE_OFFICER,
+  )
+  @ApiOperation({
+    summary:
+      'Record produce sales revenue from harvest off-take or commodity distribution',
+  })
+  @ApiParam({ name: 'farmId', description: 'Farm Estate UUID' })
+  @ApiResponse({
+    status: 201,
+    description: 'Produce sales revenue recorded successfully',
+  })
+  recordFarmRevenue(
+    @Param('farmId') farmId: string,
+    @Body() dto: CreateFarmRevenueDto,
+    @CurrentUser('id') recorderId: string,
+  ) {
+    return this.agricultureService.recordFarmRevenue(farmId, dto, recorderId);
+  }
+
+  @Get('farms/:farmId/revenues')
+  @Roles(
+    RoleType.ADMIN,
+    RoleType.SUPER_ADMIN,
+    RoleType.PROPERTY_MANAGER,
+    RoleType.FINANCE_OFFICER,
+    RoleType.AGENT,
+  )
+  @ApiOperation({
+    summary:
+      'Retrieve paginated revenue ledger for farm produce sales and bulk transactions',
+  })
+  @ApiParam({ name: 'farmId', description: 'Farm Estate UUID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Paginated produce sales records',
+  })
+  getFarmRevenues(
+    @Param('farmId') farmId: string,
+    @Query() query: FarmFinanceQueryDto,
+  ) {
+    return this.agricultureService.getFarmRevenues(farmId, query);
+  }
+
+  @Get('farms/:farmId/financial-summary')
+  @Roles(
+    RoleType.ADMIN,
+    RoleType.SUPER_ADMIN,
+    RoleType.PROPERTY_MANAGER,
+    RoleType.FINANCE_OFFICER,
+    RoleType.AGENT,
+  )
+  @ApiOperation({
+    summary:
+      'Retrieve holistic Farm Profit & Loss (P&L): budget, expenses, sales revenue, net margin %, and category distributions',
+  })
+  @ApiParam({ name: 'farmId', description: 'Farm Estate UUID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Farm financial P&L summary',
+  })
+  getFarmFinancialSummary(@Param('farmId') farmId: string) {
+    return this.agricultureService.getFarmFinancialSummary(farmId);
+  }
+
+  @Public()
+  @Get('public/farms')
+  @ApiOperation({
+    summary:
+      'Public discovery: browse active agricultural farm estates, acreage, and active crops (no auth required)',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Public catalog of agricultural farm estates',
+  })
+  getPublicFarms(@Query() query: PublicFarmQueryDto) {
+    return this.agricultureService.getPublicFarms(query);
+  }
+
+  @Public()
+  @Get('public/farms/:codeOrId')
+  @ApiOperation({
+    summary:
+      'Public showcase: get detailed public profile of a farm estate by code or UUID (no auth required)',
+  })
+  @ApiParam({ name: 'codeOrId', description: 'Farm Code (e.g. NK-FARM-XXXXX) or UUID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Detailed public farm profile and crop roadmap',
+  })
+  @ApiResponse({
+    status: 404,
+    description: 'Farm estate not found',
+  })
+  getPublicFarmByCodeOrId(@Param('codeOrId') codeOrId: string) {
+    return this.agricultureService.getPublicFarmByCodeOrId(codeOrId);
+  }
+
+  @Get('my-farms')
+  @ApiOperation({
+    summary:
+      'Customer / Investor Farmland Portal: retrieve all agricultural assets and farmland investments tied to authenticated user',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Customer farmland portfolio and crop tracking',
+  })
+  getMyFarms(@CurrentUser('id') customerId: string) {
+    return this.agricultureService.getCustomerFarms(customerId);
   }
 
 }

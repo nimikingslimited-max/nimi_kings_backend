@@ -19,6 +19,10 @@ import { CropFieldLogQueryDto } from './dto/crop-field-log-query.dto.js';
 import { CreateHarvestRecordDto } from './dto/create-harvest-record.dto.js';
 import { UpdateHarvestRecordDto } from './dto/update-harvest-record.dto.js';
 import { HarvestQueryDto } from './dto/harvest-query.dto.js';
+import { CreateFarmExpenseDto } from './dto/create-farm-expense.dto.js';
+import { CreateFarmRevenueDto } from './dto/create-farm-revenue.dto.js';
+import { FarmFinanceQueryDto } from './dto/farm-finance-query.dto.js';
+import { PublicFarmQueryDto } from './dto/public-farm-query.dto.js';
 
 @Injectable()
 export class AgricultureService {
@@ -1906,6 +1910,718 @@ export class AgricultureService {
       message: 'Harvest record deleted successfully',
       id,
       cropCycleId: existing.cropCycleId,
+    };
+  }
+
+
+  // ==========================================
+  // FEATURE 5: FARM FINANCIALS & PUBLIC/INVESTOR PORTAL
+  // ==========================================
+
+  /**
+   * Record an agricultural operating expenditure against a farm estate.
+   */
+  async recordFarmExpense(
+    farmId: string,
+    dto: CreateFarmExpenseDto,
+    recorderId: string,
+  ) {
+    const farm = await this.prisma.farm.findUnique({
+      where: { id: farmId },
+      select: { id: true, farmCode: true, name: true, budget: true },
+    });
+
+    if (!farm) {
+      throw new NotFoundException(`Farm with ID '${farmId}' not found`);
+    }
+
+    if (dto.cropCycleId) {
+      const cycle = await this.prisma.cropCycle.findFirst({
+        where: { id: dto.cropCycleId, farmId },
+      });
+      if (!cycle) {
+        throw new BadRequestException(
+          `Crop cycle '${dto.cropCycleId}' does not belong to farm '${farmId}'`,
+        );
+      }
+    }
+
+    const expense = await this.prisma.farmExpense.create({
+      data: {
+        farmId,
+        cropCycleId: dto.cropCycleId || null,
+        category: dto.category.trim().toUpperCase(),
+        description: dto.description.trim(),
+        amount: dto.amount,
+        currency: dto.currency ? dto.currency.toUpperCase() : 'NGN',
+        expenseDate: dto.expenseDate ? new Date(dto.expenseDate) : new Date(),
+        recordedById: recorderId,
+      },
+      include: {
+        recordedBy: {
+          select: { id: true, firstName: true, lastName: true, email: true },
+        },
+        cropCycle: {
+          select: { id: true, cycleCode: true, cropName: true },
+        },
+      },
+    });
+
+    const agg = await this.prisma.farmExpense.aggregate({
+      where: { farmId },
+      _sum: { amount: true },
+    });
+    const cumulativeExpenses = Number(agg._sum.amount || 0);
+    const budget = farm.budget ? Number(farm.budget) : null;
+    const isOverBudget = budget ? cumulativeExpenses > budget : false;
+
+    await this.auditService.log({
+      userId: recorderId,
+      action: 'FARM_EXPENSE_RECORDED',
+      entityType: 'FarmExpense',
+      entityId: expense.id,
+      newValues: {
+        farmId,
+        category: expense.category,
+        amount: expense.amount,
+        cumulativeExpenses,
+        budget,
+        isOverBudget,
+      },
+    });
+
+    return {
+      message: 'Farm expenditure recorded successfully',
+      expense: {
+        id: expense.id,
+        farmId: expense.farmId,
+        category: expense.category,
+        description: expense.description,
+        amount: Number(expense.amount),
+        currency: expense.currency,
+        expenseDate: expense.expenseDate,
+        cropCycle: expense.cropCycle,
+        recordedBy: expense.recordedBy,
+      },
+      financialSnapshot: {
+        budget,
+        totalExpenses: cumulativeExpenses,
+        remainingBudget: budget ? budget - cumulativeExpenses : null,
+        isOverBudget,
+      },
+    };
+  }
+
+  /**
+   * Retrieve paginated ledger of farm expenditures.
+   */
+  async getFarmExpenses(farmId: string, query: FarmFinanceQueryDto) {
+    const farm = await this.prisma.farm.findUnique({
+      where: { id: farmId },
+      select: { id: true, farmCode: true, name: true, budget: true },
+    });
+
+    if (!farm) {
+      throw new NotFoundException(`Farm with ID '${farmId}' not found`);
+    }
+
+    const page = Math.max(1, query.page || 1);
+    const limit = Math.max(1, Math.min(50, query.limit || 10));
+    const skip = (page - 1) * limit;
+
+    const where: Prisma.FarmExpenseWhereInput = {
+      farmId,
+    };
+
+    if (query.category) {
+      where.category = { contains: query.category.trim(), mode: 'insensitive' };
+    }
+
+    if (query.cropCycleId) {
+      where.cropCycleId = query.cropCycleId;
+    }
+
+    if (query.startDate || query.endDate) {
+      where.expenseDate = {};
+      if (query.startDate) where.expenseDate.gte = new Date(query.startDate);
+      if (query.endDate) where.expenseDate.lte = new Date(query.endDate);
+    }
+
+    const [expenses, total, agg] = await Promise.all([
+      this.prisma.farmExpense.findMany({
+        where,
+        include: {
+          cropCycle: {
+            select: { id: true, cycleCode: true, cropName: true },
+          },
+          recordedBy: {
+            select: { id: true, firstName: true, lastName: true, email: true },
+          },
+        },
+        orderBy: { expenseDate: 'desc' },
+        skip,
+        take: limit,
+      }),
+      this.prisma.farmExpense.count({ where }),
+      this.prisma.farmExpense.aggregate({
+        where,
+        _sum: { amount: true },
+      }),
+    ]);
+
+    return {
+      farm,
+      expenses: expenses.map((e) => ({
+        id: e.id,
+        category: e.category,
+        description: e.description,
+        amount: Number(e.amount),
+        currency: e.currency,
+        expenseDate: e.expenseDate,
+        cropCycle: e.cropCycle,
+        recordedBy: e.recordedBy,
+      })),
+      meta: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit) || 1,
+        hasMore: page * limit < total,
+        totalFilteredAmount: Number(agg._sum.amount || 0),
+      },
+    };
+  }
+
+  /**
+   * Record a produce sales transaction in the farm revenue ledger.
+   */
+  async recordFarmRevenue(
+    farmId: string,
+    dto: CreateFarmRevenueDto,
+    recorderId: string,
+  ) {
+    const farm = await this.prisma.farm.findUnique({
+      where: { id: farmId },
+      select: { id: true, farmCode: true, name: true },
+    });
+
+    if (!farm) {
+      throw new NotFoundException(`Farm with ID '${farmId}' not found`);
+    }
+
+    const totalAmount =
+      dto.totalAmount !== undefined
+        ? dto.totalAmount
+        : Number((dto.quantity * dto.unitPrice).toFixed(2));
+
+    const revenue = await this.prisma.farmRevenue.create({
+      data: {
+        farmId,
+        buyerName: dto.buyerName?.trim(),
+        produceSold: dto.produceSold.trim(),
+        quantity: dto.quantity,
+        unit: dto.unit || 'KG',
+        unitPrice: dto.unitPrice,
+        totalAmount,
+        currency: dto.currency ? dto.currency.toUpperCase() : 'NGN',
+        saleDate: dto.saleDate ? new Date(dto.saleDate) : new Date(),
+        recordedById: recorderId,
+      },
+      include: {
+        recordedBy: {
+          select: { id: true, firstName: true, lastName: true, email: true },
+        },
+      },
+    });
+
+    await this.auditService.log({
+      userId: recorderId,
+      action: 'FARM_REVENUE_RECORDED',
+      entityType: 'FarmRevenue',
+      entityId: revenue.id,
+      newValues: {
+        farmId,
+        produceSold: revenue.produceSold,
+        quantity: revenue.quantity,
+        totalAmount: revenue.totalAmount,
+        buyerName: revenue.buyerName,
+      },
+    });
+
+    return {
+      message: 'Produce sale revenue recorded successfully',
+      revenue: {
+        id: revenue.id,
+        farmId: revenue.farmId,
+        produceSold: revenue.produceSold,
+        quantity: Number(revenue.quantity),
+        unit: revenue.unit,
+        unitPrice: Number(revenue.unitPrice),
+        totalAmount: Number(revenue.totalAmount),
+        currency: revenue.currency,
+        buyerName: revenue.buyerName,
+        saleDate: revenue.saleDate,
+        recordedBy: revenue.recordedBy,
+      },
+    };
+  }
+
+  /**
+   * Retrieve paginated revenue ledger for produce sales.
+   */
+  async getFarmRevenues(farmId: string, query: FarmFinanceQueryDto) {
+    const farm = await this.prisma.farm.findUnique({
+      where: { id: farmId },
+      select: { id: true, farmCode: true, name: true },
+    });
+
+    if (!farm) {
+      throw new NotFoundException(`Farm with ID '${farmId}' not found`);
+    }
+
+    const page = Math.max(1, query.page || 1);
+    const limit = Math.max(1, Math.min(50, query.limit || 10));
+    const skip = (page - 1) * limit;
+
+    const where: Prisma.FarmRevenueWhereInput = {
+      farmId,
+    };
+
+    if (query.startDate || query.endDate) {
+      where.saleDate = {};
+      if (query.startDate) where.saleDate.gte = new Date(query.startDate);
+      if (query.endDate) where.saleDate.lte = new Date(query.endDate);
+    }
+
+    const [revenues, total, agg] = await Promise.all([
+      this.prisma.farmRevenue.findMany({
+        where,
+        include: {
+          recordedBy: {
+            select: { id: true, firstName: true, lastName: true, email: true },
+          },
+        },
+        orderBy: { saleDate: 'desc' },
+        skip,
+        take: limit,
+      }),
+      this.prisma.farmRevenue.count({ where }),
+      this.prisma.farmRevenue.aggregate({
+        where,
+        _sum: { totalAmount: true },
+      }),
+    ]);
+
+    return {
+      farm,
+      revenues: revenues.map((r) => ({
+        id: r.id,
+        produceSold: r.produceSold,
+        quantity: Number(r.quantity),
+        unit: r.unit,
+        unitPrice: Number(r.unitPrice),
+        totalAmount: Number(r.totalAmount),
+        currency: r.currency,
+        buyerName: r.buyerName,
+        saleDate: r.saleDate,
+        recordedBy: r.recordedBy,
+      })),
+      meta: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit) || 1,
+        hasMore: page * limit < total,
+        totalFilteredRevenue: Number(agg._sum.totalAmount || 0),
+      },
+    };
+  }
+
+  /**
+   * Holistic Farm Profit & Loss (P&L) and financial health report.
+   */
+  async getFarmFinancialSummary(farmId: string) {
+    const farm = await this.prisma.farm.findUnique({
+      where: { id: farmId },
+      select: {
+        id: true,
+        farmCode: true,
+        name: true,
+        status: true,
+        budget: true,
+        totalArea: true,
+        areaUnit: true,
+      },
+    });
+
+    if (!farm) {
+      throw new NotFoundException(`Farm with ID '${farmId}' not found`);
+    }
+
+    const [aggExpenses, categoryGroups, aggRevenues, recentExpenses, recentRevenues] =
+      await Promise.all([
+        this.prisma.farmExpense.aggregate({
+          where: { farmId },
+          _sum: { amount: true },
+          _count: { id: true },
+        }),
+        this.prisma.farmExpense.groupBy({
+          by: ['category'],
+          where: { farmId },
+          _sum: { amount: true },
+          _count: { id: true },
+        }),
+        this.prisma.farmRevenue.aggregate({
+          where: { farmId },
+          _sum: { totalAmount: true },
+          _count: { id: true },
+        }),
+        this.prisma.farmExpense.findMany({
+          where: { farmId },
+          orderBy: { expenseDate: 'desc' },
+          take: 5,
+          include: {
+            recordedBy: {
+              select: { id: true, firstName: true, lastName: true, email: true },
+            },
+          },
+        }),
+        this.prisma.farmRevenue.findMany({
+          where: { farmId },
+          orderBy: { saleDate: 'desc' },
+          take: 5,
+          include: {
+            recordedBy: {
+              select: { id: true, firstName: true, lastName: true, email: true },
+            },
+          },
+        }),
+      ]);
+
+    const totalExpenses = Number(aggExpenses._sum.amount || 0);
+    const totalRevenues = Number(aggRevenues._sum.totalAmount || 0);
+    const grossProfit = totalRevenues - totalExpenses;
+    const netMarginPercentage =
+      totalRevenues > 0 ? Number(((grossProfit / totalRevenues) * 100).toFixed(2)) : 0;
+    const budget = farm.budget ? Number(farm.budget) : null;
+    const budgetUtilizationPercentage =
+      budget && budget > 0 ? Number(((totalExpenses / budget) * 100).toFixed(2)) : null;
+
+    const expenseCategoryBreakdown = categoryGroups
+      .map((cg) => {
+        const sum = Number(cg._sum.amount || 0);
+        return {
+          category: cg.category,
+          totalAmount: sum,
+          count: cg._count.id,
+          percentageOfTotalExpenses:
+            totalExpenses > 0 ? Number(((sum / totalExpenses) * 100).toFixed(2)) : 0,
+        };
+      })
+      .sort((a, b) => b.totalAmount - a.totalAmount);
+
+    return {
+      farm,
+      financialSummary: {
+        budget,
+        totalExpenses,
+        totalRevenues,
+        grossProfit,
+        netMarginPercentage,
+        budgetUtilizationPercentage,
+        isProfitable: grossProfit >= 0,
+        totalExpenseTransactions: aggExpenses._count.id,
+        totalRevenueTransactions: aggRevenues._count.id,
+      },
+      expenseCategoryBreakdown,
+      recentExpenses: recentExpenses.map((e) => ({
+        id: e.id,
+        category: e.category,
+        description: e.description,
+        amount: Number(e.amount),
+        currency: e.currency,
+        expenseDate: e.expenseDate,
+        recordedBy: e.recordedBy,
+      })),
+      recentRevenues: recentRevenues.map((r) => ({
+        id: r.id,
+        produceSold: r.produceSold,
+        quantity: Number(r.quantity),
+        unit: r.unit,
+        unitPrice: Number(r.unitPrice),
+        totalAmount: Number(r.totalAmount),
+        currency: r.currency,
+        buyerName: r.buyerName,
+        saleDate: r.saleDate,
+        recordedBy: r.recordedBy,
+      })),
+    };
+  }
+
+  /**
+   * Public discovery: browse active agricultural farm estates and active crops.
+   * Internal budgets, expense receipts, and ledger lines are omitted for confidentiality.
+   */
+  async getPublicFarms(query: PublicFarmQueryDto) {
+    const page = Math.max(1, query.page || 1);
+    const limit = Math.max(1, Math.min(50, query.limit || 10));
+    const skip = (page - 1) * limit;
+
+    const where: Prisma.FarmWhereInput = {};
+
+    if (query.status) {
+      where.status = query.status;
+    } else {
+      where.status = 'ACTIVE';
+    }
+
+    if (query.state) {
+      where.state = { contains: query.state.trim(), mode: 'insensitive' };
+    }
+
+    if (query.city) {
+      where.city = { contains: query.city.trim(), mode: 'insensitive' };
+    }
+
+    if (query.search) {
+      const term = query.search.trim();
+      where.OR = [
+        { name: { contains: term, mode: 'insensitive' } },
+        { farmCode: { contains: term, mode: 'insensitive' } },
+        { description: { contains: term, mode: 'insensitive' } },
+        { address: { contains: term, mode: 'insensitive' } },
+      ];
+    }
+
+    const [farms, total] = await Promise.all([
+      this.prisma.farm.findMany({
+        where,
+        include: {
+          property: {
+            select: {
+              id: true,
+              propertyCode: true,
+              title: true,
+              media: { where: { isPrimary: true }, take: 1, select: { url: true } },
+            },
+          },
+          cropCycles: {
+            select: {
+              id: true,
+              cropName: true,
+              variety: true,
+              stage: true,
+              allocatedArea: true,
+            },
+            where: { stage: { notIn: ['CANCELLED'] } },
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: limit,
+      }),
+      this.prisma.farm.count({ where }),
+    ]);
+
+    const formatted = farms.map((f) => ({
+      id: f.id,
+      farmCode: f.farmCode,
+      name: f.name,
+      description: f.description,
+      status: f.status,
+      totalArea: Number(f.totalArea),
+      areaUnit: f.areaUnit,
+      soilType: f.soilType,
+      irrigationSource: f.irrigationSource,
+      location: {
+        address: f.address,
+        city: f.city,
+        state: f.state,
+        country: f.country,
+      },
+      property: f.property
+        ? {
+            id: f.property.id,
+            propertyCode: f.property.propertyCode,
+            title: f.property.title,
+            image: f.property.media[0]?.url || null,
+          }
+        : null,
+      activeCrops: f.cropCycles.map((c) => ({
+        cropName: c.cropName,
+        variety: c.variety,
+        stage: c.stage,
+        allocatedArea: Number(c.allocatedArea),
+      })),
+      createdAt: f.createdAt,
+    }));
+
+    return {
+      farms: formatted,
+      meta: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit) || 1,
+        hasMore: page * limit < total,
+      },
+    };
+  }
+
+  /**
+   * Public detailed showcase of a single farm estate by code or UUID.
+   */
+  async getPublicFarmByCodeOrId(codeOrId: string) {
+    const farm = await this.prisma.farm.findFirst({
+      where: {
+        OR: [{ id: codeOrId }, { farmCode: codeOrId.toUpperCase() }],
+      },
+      include: {
+        property: {
+          select: {
+            id: true,
+            propertyCode: true,
+            title: true,
+            address: true,
+            city: true,
+            state: true,
+            media: { select: { id: true, url: true, type: true, isPrimary: true } },
+          },
+        },
+        cropCycles: {
+          include: {
+            fieldLogs: {
+              take: 3,
+              orderBy: { createdAt: 'desc' },
+              include: { media: true },
+            },
+            harvests: {
+              take: 3,
+              orderBy: { harvestDate: 'desc' },
+              select: { quantity: true, unit: true, qualityGrade: true, harvestDate: true },
+            },
+          },
+        },
+      },
+    });
+
+    if (!farm) {
+      throw new NotFoundException(`Farm '${codeOrId}' not found`);
+    }
+
+    return {
+      farm: {
+        id: farm.id,
+        farmCode: farm.farmCode,
+        name: farm.name,
+        description: farm.description,
+        status: farm.status,
+        totalArea: Number(farm.totalArea),
+        areaUnit: farm.areaUnit,
+        soilType: farm.soilType,
+        irrigationSource: farm.irrigationSource,
+        location: {
+          address: farm.address,
+          city: farm.city,
+          state: farm.state,
+          country: farm.country,
+        },
+      },
+      property: farm.property,
+      cropCycles: farm.cropCycles.map((c) => ({
+        id: c.id,
+        cycleCode: c.cycleCode,
+        cropName: c.cropName,
+        variety: c.variety,
+        stage: c.stage,
+        allocatedArea: Number(c.allocatedArea),
+        areaUnit: c.areaUnit,
+        startDate: c.startDate,
+        expectedHarvestDate: c.expectedHarvestDate,
+        targetYield: c.targetYield ? Number(c.targetYield) : null,
+        yieldUnit: c.yieldUnit,
+        fieldPhotos: c.fieldLogs.flatMap((l) => l.media.map((m) => m.url)),
+        recentHarvests: c.harvests,
+      })),
+    };
+  }
+
+  /**
+   * Customer / Investor Farmland Portal: retrieve all agricultural assets tied to user.
+   */
+  async getCustomerFarms(userId: string) {
+    const userTransactions = await this.prisma.transaction.findMany({
+      where: { customerId: userId },
+      select: { propertyId: true },
+    });
+    const transactionPropertyIds = userTransactions
+      .map((t) => t.propertyId)
+      .filter((id): id is string => Boolean(id));
+
+    const farms = await this.prisma.farm.findMany({
+      where: {
+        OR: [
+          { property: { createdById: userId } },
+          { propertyId: { in: transactionPropertyIds } },
+        ],
+      },
+      include: {
+        property: {
+          select: {
+            id: true,
+            propertyCode: true,
+            title: true,
+            media: { take: 1, select: { url: true } },
+          },
+        },
+        farmManager: {
+          select: { id: true, firstName: true, lastName: true, email: true },
+        },
+        cropCycles: {
+          include: {
+            harvests: { select: { quantity: true, unit: true } },
+          },
+        },
+      },
+      orderBy: { updatedAt: 'desc' },
+    });
+
+    const formatted = farms.map((f) => {
+      const activeCycles = f.cropCycles.filter(
+        (c) => !['COMPLETED', 'CANCELLED'].includes(c.stage),
+      );
+      const allocatedArea = activeCycles.reduce(
+        (sum, c) => sum + Number(c.allocatedArea),
+        0,
+      );
+
+      return {
+        id: f.id,
+        farmCode: f.farmCode,
+        name: f.name,
+        status: f.status,
+        totalArea: Number(f.totalArea),
+        areaUnit: f.areaUnit,
+        allocatedArea: Number(allocatedArea.toFixed(2)),
+        remainingArea: Math.max(0, Number((Number(f.totalArea) - allocatedArea).toFixed(2))),
+        property: f.property,
+        farmManager: f.farmManager,
+        activeCrops: activeCycles.map((c) => ({
+          cycleCode: c.cycleCode,
+          cropName: c.cropName,
+          stage: c.stage,
+          allocatedArea: Number(c.allocatedArea),
+        })),
+        createdAt: f.createdAt,
+      };
+    });
+
+    return {
+      summary: {
+        totalFarmsTracked: formatted.length,
+        totalHectaresManaged: formatted.reduce((acc, curr) => acc + curr.totalArea, 0),
+      },
+      farms: formatted,
     };
   }
 
