@@ -1,6 +1,21 @@
 {
   "openapi": "3.0.0",
   "paths": {
+    "/api/v1": {
+      "get": {
+        "operationId": "AppController_getRoot",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "API Root",
+        "tags": [
+          "Health"
+        ]
+      }
+    },
     "/api/v1/health": {
       "get": {
         "operationId": "AppController_getHealth",

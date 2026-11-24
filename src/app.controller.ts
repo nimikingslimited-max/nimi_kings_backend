@@ -9,6 +9,19 @@ export class AppController {
   constructor(private readonly appService: AppService) {}
 
   @Public()
+  @Get()
+  @ApiOperation({ summary: 'API Root' })
+  getRoot() {
+    return {
+      name: 'NIMI KINGS LTD - Backend API',
+      version: '1.0.0',
+      status: 'online',
+      docs: '/api/docs',
+      health: '/api/v1/health',
+    };
+  }
+
+  @Public()
   @Get('health')
   @ApiOperation({ summary: 'API Health Check' })
   getHealth() {
